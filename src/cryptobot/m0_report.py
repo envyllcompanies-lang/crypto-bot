@@ -33,8 +33,9 @@ EXITS = (
     ("+50% / -40%", 0.50, -0.40),
     ("+100% / -20%", 1.00, -0.20),
 )
-# V1's largest buys for a 0.1, 0.5 and 1 SOL portfolio, plus the 1 SOL cap per trade.
-STAKES_SOL = (0.05, 0.1, 0.25, 0.4, 1.0)
+# V1's largest buys for a 0.1, 0.5 and 1 SOL portfolio, the 1 SOL cap per trade,
+# and the possible later 1.5 SOL cap.
+STAKES_SOL = (0.05, 0.1, 0.25, 0.4, 1.0, 1.5)
 # Token-account rent: refunded if the account is closed after the sell, lost if not.
 RENT_MODES = (("rent refunded", True), ("rent lost", False))
 # Priority fee plus tip per transaction. Unknown until measured on-chain (M5).
