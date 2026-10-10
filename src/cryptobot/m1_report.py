@@ -12,12 +12,17 @@ import sys
 import polars as pl
 
 from cryptobot.chain import check_row, get_transaction
-from cryptobot.fetch import RAW
+from cryptobot.fetch import RAW, ensure
 from cryptobot.validate import chain_continuity, curve_math_error, sol_quoted_classic
 
 TRADES_DS = RAW / "Slinky21__Pumpfun_v2_dataset"
 LAUNCHES_DS = RAW / "loopholetape__pumpfun-launches"
 DERIVED = RAW.parent / "derived"
+# The 12-hour trade sample the report checks; fetched on first run if missing.
+TRADE_SAMPLE = (
+    "p01_2026-08_to_2026-11/2026-09_d13-24/trade/trade_20260913T031440.parquet",
+    "p01_2026-08_to_2026-11/2026-09_d13-24/create/create_20260913T031440.parquet",
+)
 CHAIN_SAMPLE = 30
 
 
@@ -26,6 +31,8 @@ def _pct(x: float) -> str:
 
 
 def _load_sample() -> tuple[pl.DataFrame, pl.DataFrame]:
+    ensure("Slinky21/Pumpfun_v2_dataset", TRADE_SAMPLE)
+    ensure("loopholetape/pumpfun-launches")
     trades = pl.read_parquet(sorted(TRADES_DS.rglob("trade_*.parquet")))
     creates = pl.read_parquet(sorted(TRADES_DS.rglob("create_*.parquet")))
     return trades, creates

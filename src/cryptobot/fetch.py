@@ -57,6 +57,24 @@ def download(dataset: str, path: str, size: int, attempts: int = 8) -> Path:
     return dest
 
 
+def ensure(dataset: str, prefixes: tuple[str, ...] = ("",)) -> Path:
+    """Make sure every file under `prefixes` is on disk, downloading only what is missing.
+
+    Analysis code calls this before reading, so a fresh checkout fetches its own data
+    from Hugging Face for free. Offline, files already on disk are used as they are.
+    """
+    root = local_dir(dataset)
+    try:
+        files = [f for p in prefixes for f in list_files(dataset, p)]
+    except OSError:
+        if all((root / p).exists() for p in prefixes):
+            return root
+        raise
+    for f in files:
+        download(dataset, f["path"], f["size"])
+    return root
+
+
 def main(argv: list[str]) -> None:
     dataset, prefixes = argv[0], argv[1:] or [""]
     files = [f for p in prefixes for f in list_files(dataset, p)]

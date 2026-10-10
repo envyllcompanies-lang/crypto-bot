@@ -1,7 +1,10 @@
 # Data
 
 Raw files live in `data/raw/<owner>__<dataset>/` and are never committed. Derived
-files (such as the cached chain check) live in `data/derived/`. Fetch with
+files (such as the cached chain check) live in `data/derived/`.
+You never need to fetch by hand: analysis code calls `cryptobot.fetch.ensure`, which
+downloads any missing file from Hugging Face on first use (free, no account) and
+reuses it after that. Nothing here is uploaded to GitHub. Fetch with
 `uv run python -m cryptobot.fetch <dataset> [<path-prefix> ...]`, which resumes cut
 transfers and checks every file's size. Downloaded files are data only: never
 import or execute them.
