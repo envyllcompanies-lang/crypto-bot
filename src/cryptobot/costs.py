@@ -19,6 +19,11 @@ BPS = 10_000
 PUMP_CURVE_FEE_BPS = 125  # 0.95% protocol + 0.30% creator
 TERMINAL_FEE_BPS = 100  # Terminal's own fee, before cashback
 
+# Rent for the token account a first buy creates: a 165-byte SPL token account.
+# Token-2022 accounts with extensions cost slightly more; measure on-chain in M5.
+# Closing the account after the sell refunds it; leaving it open loses it.
+TOKEN_ACCOUNT_RENT_LAMPORTS = 2_039_280
+
 
 @dataclass(frozen=True)
 class Venue:
@@ -55,17 +60,22 @@ def net_return(
     venue: Venue,
     stake_lamports: int,
     network_lamports_per_tx: int = 0,
+    rent_lamports: int = 0,
+    rent_refunded: bool = True,
 ) -> float:
     """Return on the stake after fees and two transactions, for a given price move.
 
     `price_move` is the change between the entry and exit fill prices, e.g. 0.5
-    for +50% or -0.2 for -20%.
+    for +50% or -0.2 for -20%. `rent_lamports` is paid on the buy and comes back
+    only if the token account is closed after the sell (`rent_refunded`).
     """
     if stake_lamports <= 0:
         raise ValueError("stake must be positive")
     f = venue.fee_rate
     proceeds = stake_lamports / (1 + f) * (1 + price_move) * (1 - f)
     proceeds -= 2 * network_lamports_per_tx
+    if not rent_refunded:
+        proceeds -= rent_lamports
     return proceeds / stake_lamports - 1
 
 
@@ -75,10 +85,13 @@ def break_even_win_rate(
     venue: Venue,
     stake_lamports: int,
     network_lamports_per_tx: int = 0,
+    rent_lamports: int = 0,
+    rent_refunded: bool = True,
 ) -> float:
     """Win rate at which expected profit is zero, for fixed win and loss price moves."""
-    win = net_return(win_move, venue, stake_lamports, network_lamports_per_tx)
-    loss = net_return(loss_move, venue, stake_lamports, network_lamports_per_tx)
+    extra = (network_lamports_per_tx, rent_lamports, rent_refunded)
+    win = net_return(win_move, venue, stake_lamports, *extra)
+    loss = net_return(loss_move, venue, stake_lamports, *extra)
     if win <= 0:
         return 1.0
     if loss >= 0:

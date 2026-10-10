@@ -6,6 +6,7 @@ from cryptobot.costs import (
     DIRECT,
     TERMINAL_DEFAULT,
     TERMINAL_REFERRAL,
+    TOKEN_ACCOUNT_RENT_LAMPORTS,
     break_even_win_rate,
     net_return,
     round_trip_cost,
@@ -56,3 +57,24 @@ def test_flat_trade_loses_exactly_the_round_trip():
 def test_cashback_must_be_a_share():
     with pytest.raises(ValueError):
         terminal(35)
+
+
+def test_rent_refunded_costs_nothing():
+    rent = TOKEN_ACCOUNT_RENT_LAMPORTS
+    with_rent = net_return(0.45, TERMINAL_REFERRAL, STAKE, 0, rent, rent_refunded=True)
+    assert with_rent == net_return(0.45, TERMINAL_REFERRAL, STAKE)
+
+
+def test_rent_lost_costs_the_rent_and_raises_break_even():
+    rent = TOKEN_ACCOUNT_RENT_LAMPORTS
+    stake = to_lamports(0.25)
+    lost = net_return(0.45, TERMINAL_REFERRAL, stake, 0, rent, rent_refunded=False)
+    kept = net_return(0.45, TERMINAL_REFERRAL, stake)
+    assert kept - lost == pytest.approx(rent / stake)
+    assert break_even_win_rate(
+        0.45, -0.1, TERMINAL_REFERRAL, stake, 0, rent, rent_refunded=False
+    ) > break_even_win_rate(0.45, -0.1, TERMINAL_REFERRAL, stake)
+
+
+def test_rent_is_about_0_002_sol():
+    assert TOKEN_ACCOUNT_RENT_LAMPORTS / 1e9 == pytest.approx(0.002, abs=0.0001)

@@ -4,6 +4,7 @@ import pytest
 
 from cryptobot.curve import (
     CURVE_SALE_TOKENS,
+    GRADUATION_VIRTUAL_TOKENS,
     LAUNCH,
     LAUNCH_MARKET_CAP,
     RAW_PER_TOKEN,
@@ -47,14 +48,35 @@ def test_graduation():
 
 
 def test_buying_all_curve_tokens_graduates():
-    curve, _ = LAUNCH.after_buy(to_lamports(200))
+    curve, _, _ = LAUNCH.after_buy(to_lamports(200))
     assert curve.graduated
     assert curve.tokens_sold == CURVE_SALE_TOKENS
 
 
+def test_buy_past_graduation_charges_only_what_completes_the_curve():
+    start = Curve.at_multiple(14)
+    sol_in = to_lamports(10)
+    curve, tokens, spent = start.after_buy(sol_in)
+    grad = graduation_curve()
+    assert curve.graduated
+    assert tokens == start.virtual_tokens - GRADUATION_VIRTUAL_TOKENS
+    assert spent < sol_in
+    # The curve ends exactly at graduation, give or take integer rounding.
+    assert abs(curve.virtual_sol - grad.virtual_sol) <= 1
+    assert curve.virtual_sol == start.virtual_sol + spent
+
+
+def test_buy_below_graduation_spends_everything():
+    start = Curve.at_multiple(8.0)
+    curve, tokens, spent = start.after_buy(to_lamports(1))
+    assert spent == to_lamports(1)
+    assert not curve.graduated
+    assert tokens == start.tokens_out(to_lamports(1))
+
+
 def test_round_trip_without_other_trades_returns_the_stake():
     stake = to_lamports(0.4)
-    curve, tokens = Curve.at_multiple(8.0).after_buy(stake)
+    curve, tokens, _ = Curve.at_multiple(8.0).after_buy(stake)
     _, back = curve.after_sell(tokens)
     # Integer flooring may cost a few lamports, never gain any.
     assert stake - 10 <= back <= stake

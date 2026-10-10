@@ -6,7 +6,12 @@ Every number in the report comes from this module.
 
 from __future__ import annotations
 
-from cryptobot.costs import VENUES, break_even_win_rate, round_trip_cost
+from cryptobot.costs import (
+    TOKEN_ACCOUNT_RENT_LAMPORTS,
+    VENUES,
+    break_even_win_rate,
+    round_trip_cost,
+)
 from cryptobot.curve import (
     LAUNCH_MARKET_CAP,
     Curve,
@@ -28,8 +33,10 @@ EXITS = (
     ("+50% / -40%", 0.50, -0.40),
     ("+100% / -20%", 1.00, -0.20),
 )
-# V1's largest buys for a 0.1, 0.5 and 1 SOL portfolio.
-STAKES_SOL = (0.05, 0.1, 0.25, 0.4)
+# V1's largest buys for a 0.1, 0.5 and 1 SOL portfolio, plus the 1 SOL cap per trade.
+STAKES_SOL = (0.05, 0.1, 0.25, 0.4, 1.0)
+# Token-account rent: refunded if the account is closed after the sell, lost if not.
+RENT_MODES = (("rent refunded", True), ("rent lost", False))
 # Priority fee plus tip per transaction. Unknown until measured on-chain (M5).
 NETWORK_SOL_PER_TX = (0.0, 0.0005, 0.001, 0.002)
 
@@ -94,23 +101,37 @@ def break_even_tables() -> list[str]:
         "",
         "Win rate needed for zero expected profit, assuming every win and every loss hits the",
         "stated price move exactly. Price impact and slipped fills are not included yet (M2).",
-        "Network cost per transaction is an assumption until measured.",
+        "Network cost per transaction is an assumption until measured. Token-account rent is",
+        f"{TOKEN_ACCOUNT_RENT_LAMPORTS / 1e9:.6f} SOL per trade: refunded if the account is closed",
+        "after the sell, lost if not.",
         "",
     ]
     for venue in VENUES:
-        lines += [f"### {venue.name}", ""]
-        header = (
-            "| Exit | Stake (SOL) | " + " | ".join(f"{n} SOL/tx" for n in NETWORK_SOL_PER_TX) + " |"
-        )
-        lines += [header, "|---|---|" + "---|" * len(NETWORK_SOL_PER_TX)]
-        for label, win, loss in EXITS:
-            for stake in STAKES_SOL:
-                cells = [
-                    _pct(break_even_win_rate(win, loss, venue, to_lamports(stake), to_lamports(n)))
-                    for n in NETWORK_SOL_PER_TX
-                ]
-                lines.append(f"| {label} | {stake} | " + " | ".join(cells) + " |")
-        lines.append("")
+        for rent_label, refunded in RENT_MODES:
+            lines += [f"### {venue.name}, {rent_label}", ""]
+            cols = " | ".join(f"{n} SOL/tx" for n in NETWORK_SOL_PER_TX)
+            lines += [
+                f"| Exit | Stake (SOL) | {cols} |",
+                "|---|---|" + "---|" * len(NETWORK_SOL_PER_TX),
+            ]
+            for label, win, loss in EXITS:
+                for stake in STAKES_SOL:
+                    cells = [
+                        _pct(
+                            break_even_win_rate(
+                                win,
+                                loss,
+                                venue,
+                                to_lamports(stake),
+                                to_lamports(n),
+                                TOKEN_ACCOUNT_RENT_LAMPORTS,
+                                refunded,
+                            )
+                        )
+                        for n in NETWORK_SOL_PER_TX
+                    ]
+                    lines.append(f"| {label} | {stake} | " + " | ".join(cells) + " |")
+            lines.append("")
     return lines
 
 

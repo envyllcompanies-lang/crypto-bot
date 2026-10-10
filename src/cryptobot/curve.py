@@ -62,12 +62,25 @@ class Curve:
     def market_cap_lamports(self) -> int:
         return self.virtual_sol * TOTAL_SUPPLY // self.virtual_tokens
 
+    @property
+    def tokens_left(self) -> int:
+        """Raw tokens still for sale before graduation."""
+        return max(self.virtual_tokens - GRADUATION_VIRTUAL_TOKENS, 0)
+
+    def sol_to_graduate(self) -> int:
+        """Lamports that buy every remaining curve token (rounded up, as the program charges)."""
+        left = self.tokens_left
+        if left == 0:
+            return 0
+        return -(-left * self.virtual_sol // (self.virtual_tokens - left))
+
     def tokens_out(self, sol_in: int) -> int:
         """Raw tokens received for `sol_in` lamports reaching the curve (after fees)."""
         if sol_in < 0:
             raise ValueError("sol_in must be non-negative")
-        out = sol_in * self.virtual_tokens // (self.virtual_sol + sol_in)
-        return min(out, self.virtual_tokens - GRADUATION_VIRTUAL_TOKENS)
+        if sol_in >= self.sol_to_graduate():
+            return self.tokens_left
+        return sol_in * self.virtual_tokens // (self.virtual_sol + sol_in)
 
     def sol_out(self, tokens_in: int) -> int:
         """Lamports the curve pays for `tokens_in` raw tokens (before fees)."""
@@ -75,9 +88,15 @@ class Curve:
             raise ValueError("tokens_in must be non-negative")
         return tokens_in * self.virtual_sol // (self.virtual_tokens + tokens_in)
 
-    def after_buy(self, sol_in: int) -> tuple[Curve, int]:
+    def after_buy(self, sol_in: int) -> tuple[Curve, int, int]:
+        """Apply a buy. Returns (new curve, raw tokens received, lamports spent).
+
+        A buy larger than what is left on the curve is charged only the lamports
+        that complete it; the caller keeps `sol_in - spent`.
+        """
         out = self.tokens_out(sol_in)
-        return Curve(self.virtual_sol + sol_in, self.virtual_tokens - out), out
+        spent = min(sol_in, self.sol_to_graduate())
+        return Curve(self.virtual_sol + spent, self.virtual_tokens - out), out, spent
 
     def after_sell(self, tokens_in: int) -> tuple[Curve, int]:
         out = self.sol_out(tokens_in)
