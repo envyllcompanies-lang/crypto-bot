@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import itertools
 import json
 import os
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -40,6 +42,7 @@ _DTYPES = {
     "bool": pl.Boolean,
 }
 _META = {
+    "seq": pl.UInt64,
     "signature": pl.Utf8,
     "slot": pl.UInt64,
     "received_ms": pl.Int64,
@@ -60,11 +63,25 @@ SCHEMAS = {
 }
 
 
+# Arrival order of notifications in this process. With `event_index` it orders every
+# event exactly as it arrived, which millisecond timestamps alone cannot.
+_SEQ = itertools.count()
+
+RowsCallback = Callable[[list[dict], list[dict]], None]
+GapCallback = Callable[[int], None]
+
+
+class ConsumerError(RuntimeError):
+    """A callback failed. Stop recording instead of treating it as a dropped connection."""
+
+
 def now_ms() -> int:
     return time.time_ns() // 1_000_000
 
 
-def rows_from_notification(msg: dict, received_ms: int) -> tuple[list[dict], list[dict], bool]:
+def rows_from_notification(
+    msg: dict, received_ms: int, seq: int = 0
+) -> tuple[list[dict], list[dict], bool]:
     """Split one logsNotification into create rows, trade rows and a truncated-logs flag.
 
     Failed transactions are skipped: their events never took effect.
@@ -74,7 +91,7 @@ def rows_from_notification(msg: dict, received_ms: int) -> tuple[list[dict], lis
     if value.get("err") is not None:
         return [], [], False
     logs = value.get("logs") or []
-    meta = {"signature": value["signature"], "slot": result["context"]["slot"]}
+    meta = {"seq": seq, "signature": value["signature"], "slot": result["context"]["slot"]}
     creates, trades = [], []
     for i, (kind, fields) in enumerate(events_from_logs(logs)):
         row = {**meta, "received_ms": received_ms, "event_index": i, **fields}
@@ -86,9 +103,10 @@ def rows_from_notification(msg: dict, received_ms: int) -> tuple[list[dict], lis
 class Sink:
     """Buffers rows per table and writes them as Parquet files."""
 
-    def __init__(self, root: Path = LIVE) -> None:
+    def __init__(self, root: Path = LIVE, schemas: dict[str, dict] = SCHEMAS) -> None:
         self.root = root
-        self.rows: dict[str, list[dict]] = {t: [] for t in SCHEMAS}
+        self.schemas = schemas
+        self.rows: dict[str, list[dict]] = {t: [] for t in schemas}
 
     def add(self, table: str, rows: list[dict]) -> None:
         self.rows[table].extend(rows)
@@ -101,13 +119,15 @@ class Sink:
                 continue
             path = self.root / table / f"{stamp:%Y-%m-%d}" / f"{stamp:%H%M%S%f}.parquet"
             path.parent.mkdir(parents=True, exist_ok=True)
-            pl.DataFrame(rows, schema=SCHEMAS[table], strict=False).write_parquet(path)
+            pl.DataFrame(rows, schema=self.schemas[table], strict=False).write_parquet(path)
             written.append(path)
             self.rows[table] = []
         return written
 
 
-async def _session(url: str, sink: Sink, deadline: float, stats: dict) -> None:
+async def _session(
+    url: str, sink: Sink, deadline: float, stats: dict, on_rows: RowsCallback | None
+) -> None:
     import websockets
 
     async with websockets.connect(url, max_size=2**24, ping_interval=20) as ws:
@@ -126,9 +146,14 @@ async def _session(url: str, sink: Sink, deadline: float, stats: dict) -> None:
             msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=60))
             if msg.get("method") != "logsNotification":
                 continue
-            creates, trades, truncated = rows_from_notification(msg, now_ms())
+            creates, trades, truncated = rows_from_notification(msg, now_ms(), next(_SEQ))
             sink.add("create", creates)
             sink.add("trade", trades)
+            if on_rows is not None:
+                try:
+                    on_rows(creates, trades)
+                except Exception as exc:
+                    raise ConsumerError("on_rows failed") from exc
             stats["txs"] += 1
             stats["failed_txs"] += msg["params"]["result"]["value"].get("err") is not None
             stats["truncated_txs"] += truncated
@@ -137,25 +162,46 @@ async def _session(url: str, sink: Sink, deadline: float, stats: dict) -> None:
                 last_flush = time.monotonic()
 
 
-async def record(minutes: float | None, url: str, sink: Sink) -> None:
+async def record(
+    minutes: float | None,
+    url: str,
+    sink: Sink,
+    on_rows: RowsCallback | None = None,
+    on_gap: GapCallback | None = None,
+) -> None:
+    """Stream until the deadline, reconnecting on drops.
+
+    `on_rows` gets each transaction's create and trade rows as they arrive. `on_gap`
+    gets the time a connection dropped, when the next connection starts, so a consumer
+    knows events may be missing (the same gaps paper.recorded_events finds on disk).
+    """
     deadline = time.monotonic() + minutes * 60 if minutes else float("inf")
     backoff = 1
+    gap: int | None = None  # end of the last dropped connection, reported on reconnect
     while time.monotonic() < deadline:
+        if gap is not None and on_gap is not None:
+            on_gap(gap)
+        gap = None
         stats = {"connected_ms": now_ms(), "txs": 0, "failed_txs": 0, "truncated_txs": 0}
         reason = "deadline"
         try:
-            await _session(url, sink, deadline, stats)
+            await _session(url, sink, deadline, stats, on_rows)
         except asyncio.CancelledError:
             reason = "stopped"
+            raise
+        except ConsumerError:
+            reason = "consumer_error"
             raise
         except Exception as exc:  # any drop means reconnect; the reason is logged
             reason = type(exc).__name__
         finally:
-            sink.add("sessions", [{**stats, "disconnected_ms": now_ms(), "end_reason": reason}])
+            ended = now_ms()
+            sink.add("sessions", [{**stats, "disconnected_ms": ended, "end_reason": reason}])
             sink.flush()
             print(f"session ended ({reason}): {stats['txs']:,} txs", flush=True)
         if reason == "deadline":
             break
+        gap = ended
         backoff = 1 if stats["txs"] else min(backoff * 2, 60)
         await asyncio.sleep(backoff)
 
