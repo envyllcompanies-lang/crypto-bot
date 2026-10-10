@@ -32,7 +32,8 @@ From `pump-fun/pump-public-docs` (program `6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5u
 - Constant product with virtual reserves: 30 SOL and 1,073,000,000 tokens at launch. 793,100,000 tokens are sold through the curve. Supply 1,000,000,000.
 - Price = vSol / vTokens. Market cap in SOL = vSol^2 / 32.19.
 - Launch market cap 27.96 SOL. Graduation at vSol 115 (85 real SOL), market cap 410.9 SOL, which is 14.7x launch. After graduation the token trades on PumpSwap; its pools carry a `virtual_quote_reserves` field (Sept 2026 change).
-- Mayhem-mode tokens (program `MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e`) have 2B supply and an agent trading at random for 24 hours. Exclude them.
+- Mayhem-mode tokens (program `MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e`) have an agent trading at random for 24 hours. Exclude them by the `is_mayhem_mode` flag. In the M1 data they launch with 1B supply, not 2B as first stated. They were 25-28% of launches.
+- Some curves are quoted in assets other than SOL (about 10-30% of launches). Keep only curves that start at 30 virtual SOL.
 
 ### Costs
 
@@ -40,7 +41,8 @@ As of 8 Oct 2026 (recheck https://pump.fun/docs/fees before relying on them):
 
 - Pump.fun: 1.25% per curve trade (0.95% protocol + 0.30% creator). PumpSwap starts at 1.25% and steps down with market cap.
 - Terminal: 1% per trade, less 10% cashback (35% with a referral code).
-- Network: priority fee plus tip per transaction, fixed in SOL, so it hurts small trades most. About 0.002 SOL of refundable rent per new token account.
+- Network: priority fee plus tip per transaction, fixed in SOL, so it hurts small trades most. About 0.002 SOL of refundable rent per new token account. 99.8% of launches use Token-2022, whose accounts may cost slightly more; measure in M5.
+- Classic curves (SOL-quoted, not Mayhem) charged exactly 0.95% protocol + 0.30% creator on 99% of trades in the M1 sample (0.95% + 0% on the rest). Other curves charge creator fees of 1-3%, another reason to exclude them.
 - Round trip on the curve: about 2.5% direct to the program, 3.8-4.3% through Terminal, before network costs.
 
 ### Thresholds
@@ -140,8 +142,9 @@ The owner wants X and other social accounts used to track virality and each toke
 
 | Source | Use | Cost | Status |
 |---|---|---|---|
-| Hugging Face `cryptodata/pumpfun-dataset-light` | Trade-level backtest: ~41M rows with wallet, amounts, reserves, fees | Free, CC-BY-4.0 | Not yet opened; date range unknown |
-| Hugging Face `loopholetape/pumpfun-launches` | 781,574 launches, 31 Aug-24 Sep 2026, graduation and rug labels, first-minute features | Free, CC-BY-4.0 | Not yet opened; card lists known defects |
+| Hugging Face `cryptodata/pumpfun-dataset-light` | Planned trade-level source | Free | Unavailable (HTTP 401, not in search) |
+| Hugging Face `Slinky21/Pumpfun_v2_dataset` | Trade-level backtest: every curve trade with wallet, amounts, reserves, fees; 1 Aug-12 Oct 2026; trade table 36 GB | Free; **no licence stated** | Validated on a 12-hour sample (M1 report) |
+| Hugging Face `loopholetape/pumpfun-launches` | 1,180,869 launches, 31 Aug-3 Oct 2026, graduation and rug labels, first-minute features | Free, CC-BY-4.0 | Fetched; base rates in the M1 report |
 | Our own recorder on a Solana RPC websocket | Forward data we control | Free tier (Helius: 1M credits, 10 req/s) | To build |
 | PumpPortal websocket | New-token and migration events | Free; token trades metered | Optional |
 | PumpFunData archive | Hourly Parquet since Feb 2026 | About $24 a month of data | Ask before buying |
