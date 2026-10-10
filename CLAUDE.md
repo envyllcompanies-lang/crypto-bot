@@ -156,10 +156,13 @@ The environment needs `huggingface.co` (datasets) and `publish.twitter.com` (oEm
 - **M0 Scaffold.** Repo layout, tooling, and `curve.py` with tests that reproduce every number in "Facts to build on", plus the break-even table.
 - **M1 Data.** Fetch and validate the two free datasets. Write `data/README.md` and a data-quality report.
 - **M2 Replay engine.** Event-driven backtester over trade events with the fill model above. Test it on hand-built toy tokens first.
-- **M3 Setup scoring.** Score the V1 baseline first, then detect S1-S5, run the exit grid, report win rate, average win and loss, expectancy per trade and per day, with sample sizes and confidence intervals. Split by week to check stability.
-- **M4 Filter study.** Which filters and features change the S1-S5 results, tested out of sample.
-- **M5 Recorder.** Capture live create and trade events to Parquet.
-- **M6 Paper trader.** Run the surviving rules live with simulated fills and compare against the backtest.
+
+Priority (owner, 10 Oct 2026): live testing matters more than backtesting. Order from here: M5, M6, then a cut-down M3, then M4. "Live" means paper trading on live data with simulated fills; real money still only on the owner's say-so.
+
+- **M5 Recorder.** Capture live create and trade events to Parquet. Starts on the free public RPC; move to a free Helius key (owner puts it in `.env`) only if the public stream drops events.
+- **M6 Paper trader.** Run the V1 baseline live on recorded events with the M2 fill model and simulated fills, and log every decision. Compare against the backtest once M3 exists.
+- **M3 Setup scoring (cut down).** A quick V1 baseline backtest on the free data as a sanity check before rules go to paper trading. Then S1-S5 and the exit grid as time allows: win rate, average win and loss, expectancy per trade and per day, with sample sizes and confidence intervals.
+- **M4 Filter study.** Which filters and features change the results, tested out of sample on backtest and recorded live data.
 
 Stop after each milestone and report before starting the next.
 
