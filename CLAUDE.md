@@ -18,7 +18,7 @@ Full research report (verdicts, sources, math): https://claude.ai/code/artifact/
 ## Stack and conventions
 
 - Python 3.12, uv for environments, pytest for tests, ruff for lint.
-- Data as Parquet, queried with Polars or DuckDB. Raw data is never committed; `data/` is git-ignored and each dataset gets a short entry in `data/README.md` (source, date range, licence, how it was fetched).
+- Data as Parquet, queried with Polars or DuckDB. Each dataset gets a short entry in `data/README.md` (source, date range, licence, how it was fetched).
 - Layout: `src/cryptobot/` (library), `tests/`, `notebooks/` (exploration only), `reports/` (dated markdown results), `docs/` (spec and research).
 - Keep amounts in lamports and raw token units inside the code. Convert to SOL or USD only at the edges.
 - Small commits on a branch, with tests. Commit or push only when asked.
