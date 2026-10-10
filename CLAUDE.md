@@ -145,7 +145,7 @@ The owner wants X and other social accounts used to track virality and each toke
 | Hugging Face `cryptodata/pumpfun-dataset-light` | Planned trade-level source | Free | Unavailable (HTTP 401, not in search) |
 | Hugging Face `Slinky21/Pumpfun_v2_dataset` | Trade-level backtest: every curve trade with wallet, amounts, reserves, fees; 1 Aug-12 Oct 2026; trade table 36 GB | Free; **no licence stated** | Validated on a 12-hour sample (M1 report) |
 | Hugging Face `loopholetape/pumpfun-launches` | 1,180,869 launches, 31 Aug-3 Oct 2026, graduation and rug labels, first-minute features | Free, CC-BY-4.0 | Fetched; base rates in the M1 report |
-| Our own recorder on a Solana RPC websocket | Forward data we control | Free tier (Helius: 1M credits, 10 req/s) | To build |
+| Our own recorder on a Solana RPC websocket | Forward data we control | Free: public RPC, no key (Helius free tier as a fallback) | Built (M5, `recorder.py`); checked in the M5 report |
 | PumpPortal websocket | New-token and migration events | Free; token trades metered | Optional |
 | PumpFunData archive | Hourly Parquet since Feb 2026 | About $24 a month of data | Ask before buying |
 
@@ -159,14 +159,16 @@ The environment needs `huggingface.co` (datasets) and `publish.twitter.com` (oEm
 
 Priority (owner, 10 Oct 2026): live testing matters more than backtesting. Order from here: M5, M6, then a cut-down M3, then M4. "Live" means paper trading on live data with simulated fills; real money still only on the owner's say-so.
 
-- **M5 Recorder.** Capture live create and trade events to Parquet. Starts on the free public RPC; move to a free Helius key (owner puts it in `.env`) only if the public stream drops events.
-- **M6 Paper trader.** Run the V1 baseline live on recorded events with the M2 fill model and simulated fills, and log every decision. Compare against the backtest once M3 exists.
+- **M5 Recorder.** Capture live create and trade events to Parquet. Starts on the free public RPC; move to a free Helius key (owner puts it in `.env`) only if the public stream drops events. Done: `recorder.py`, `events.py`, `m5_report.py`.
+- **M6 Paper trader.** Run the V1 baseline live on recorded events with the M2 fill model and simulated fills, and log every decision. Compare against the backtest once M3 exists. Built: `paper.py` (live and replay share one engine; a test proves it matches `replay.py`), `features.py`, `v1.py`, `m6_report.py`. Proxies it uses: "pro traders" = wallets that bought at least 0.5 SOL of the token; "insiders" = the dev plus wallets that bought in the launch slot or the next one; Final Stretch = curve progress of 50%, 75% or 87%, with no entries in a run's first 40 minutes (the column ranking needs every token up to 40 minutes old). Not evaluated yet: X link type, top-5 holder SOL balances, funding sources, tracked wallets.
 - **M3 Setup scoring (cut down).** A quick V1 baseline backtest on the free data as a sanity check before rules go to paper trading. Then S1-S5 and the exit grid as time allows: win rate, average win and loss, expectancy per trade and per day, with sample sizes and confidence intervals.
 - **M4 Filter study.** Which filters and features change the results, tested out of sample on backtest and recorded live data.
 
 Stop after each milestone and report before starting the next.
 
 ## Known gaps
+
+- The paper trader's "pro traders", "insiders" and Final Stretch threshold are our proxies for Terminal's labels, and four of V1's checks are not evaluated (see M6). Its results are V1 without those checks.
 
 - The report's two charts and its final source check were not finished.
 - Whether Pump.fun's terms exclude US persons was not confirmed; its "Prohibited Jurisdiction" definition could not be read. Terminal's terms could not be retrieved.

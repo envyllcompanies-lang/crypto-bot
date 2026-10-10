@@ -60,3 +60,20 @@ Hugging Face search, so it is either private or deleted. Slinky21 replaces it.
 - **Licence:** public on-chain data recorded by us.
 - **Fetch:** `uv run python -m cryptobot.recorder [--minutes N]`; check it with
   `uv run python -m cryptobot.m5_report`.
+
+## Paper trading runs (ours, M6)
+
+- **Source:** `uv run python -m cryptobot.paper live [--minutes N]` (live stream) or
+  `uv run python -m cryptobot.paper replay --events DIR` (recorded events).
+- **What:** one folder per run, `data/paper/<UTC start>[-replay]/`:
+  - `decisions/`: every signal, fill, skip and stream gap, with the variant, mint, price
+    and the variant's paper wallet balance.
+  - `trades/`: every closed paper trade, with entry and exit times and prices, cost,
+    proceeds, PnL, exit reason and flags.
+  - `gates/`: each time a token starts or stops passing a universe's rules, with every
+    rule's result (null = not evaluated) and the token's features.
+  - `variants.json`: the settings of each variant. `summary.json`: counts and final
+    wallet balances.
+  - `events/` (live runs only): the raw stream, in the recorder's layout, so the run can
+    be replayed exactly.
+- **Report:** `uv run python -m cryptobot.m6_report [RUN_DIR]`.
