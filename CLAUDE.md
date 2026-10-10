@@ -83,7 +83,7 @@ Five setups, all the same bet: early holders dump, we buy the drop, we sell the 
   - Few tracked wallets.
 - **Entry.** V1's 40-50% drop from the all-time high is one candidate, not a requirement; the creator doesn't always wait for it. Test entries side by side: no dip, 25%, 40% and 50% drops, and any other entry the owner describes. Let expectancy net of costs pick, not win rate alone.
 - **Exit.** Sell everything at the first price below entry. Take profit at +45%, +50% or 2x.
-- **Size.** Keep V1's sizes: a 1 SOL portfolio gives 0.25 SOL on New Pairs and 0.4 SOL on Final Stretch. No trade ever exceeds **1 SOL**, used only once the wallet reaches a threshold the owner sets. The cap may rise to 1.5 SOL later, never higher. The M2 fill model must handle price impact for stakes up to 1.5 SOL.
+- **Size.** Keep V1's sizes: a 1 SOL portfolio gives 0.25 SOL on New Pairs and 0.4 SOL on Final Stretch. Stakes can grow with the wallet, but no trade ever exceeds **1 SOL**, used only once the wallet reaches a threshold the owner sets. The cap may rise to 1.5 SOL later, never higher. Backtests and the fill model cover stakes up to 1.5 SOL.
 
 The headline comparison is the bounce rate of bundle-filtered tokens against all tokens, at matched age and peak. If the filter doesn't raise the win rate net of costs, it isn't doing its job. Also report the age effect: compare tokens 0-10, 10-20 and 20-40 minutes old at entry, and check whether bounce rates change at the 40-minute cut.
 
