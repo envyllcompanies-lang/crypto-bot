@@ -31,7 +31,7 @@ From `pump-fun/pump-public-docs` (program `6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5u
 
 - Constant product with virtual reserves: 30 SOL and 1,073,000,000 tokens at launch. 793,100,000 tokens are sold through the curve. Supply 1,000,000,000.
 - Price = vSol / vTokens. Market cap in SOL = vSol^2 / 32.19.
-- Launch market cap 27.96 SOL. Graduation at vSol 115 (85 real SOL), market cap 410.8 SOL, which is 14.7x launch. After graduation the token trades on PumpSwap; its pools carry a `virtual_quote_reserves` field (Sept 2026 change).
+- Launch market cap 27.96 SOL. Graduation at vSol 115 (85 real SOL), market cap 410.9 SOL, which is 14.7x launch. After graduation the token trades on PumpSwap; its pools carry a `virtual_quote_reserves` field (Sept 2026 change).
 - Mayhem-mode tokens (program `MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e`) have 2B supply and an agent trading at random for 24 hours. Exclude them.
 
 ### Costs
