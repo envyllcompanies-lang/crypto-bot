@@ -46,3 +46,17 @@ import or execute them.
 
 The trade dataset named in the original plan returns HTTP 401 and does not appear in
 Hugging Face search, so it is either private or deleted. Slinky21 replaces it.
+
+## Live recorder (our own, M5)
+
+- **Source:** Pump.fun program logs streamed from the free public RPC
+  (`wss://api.mainnet-beta.solana.com`, `logsSubscribe`), decoded with the field lists
+  of `idl/pump.json` from `pump-fun/pump-public-docs`. A keyed RPC can be used by
+  setting `CRYPTOBOT_WS_URL` in `.env`; the URL is never printed.
+- **What:** `data/live/{create,trade,sessions}/<UTC date>/*.parquet`. `sessions` holds
+  one row per connection (start, end, transactions, failed, truncated logs, end reason)
+  so coverage gaps are recorded.
+- **Date range:** whatever has been recorded on this machine.
+- **Licence:** public on-chain data recorded by us.
+- **Fetch:** `uv run python -m cryptobot.recorder [--minutes N]`; check it with
+  `uv run python -m cryptobot.m5_report`.
