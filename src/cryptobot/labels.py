@@ -100,9 +100,21 @@ def run_labels(run: Path) -> pl.DataFrame | None:
     return out
 
 
-def build(root: Path = PAPER) -> pl.DataFrame | None:
-    runs = sorted(p for p in root.iterdir() if p.is_dir()) if root.exists() else []
-    frames = [df for r in runs if (df := run_labels(r)) is not None]
+BACKTEST = PAPER.parent / "backtest"  # backtest.BACKTEST, without importing the engine
+
+
+def build(roots: tuple[Path, ...] = (PAPER, BACKTEST)) -> pl.DataFrame | None:
+    """Labels from every run under `roots`. `source` says which: live paper runs have
+    lookups; backtest runs scored offline (conviction.OFFLINE), so their holder and X
+    features are not comparable and a scorer should treat the two separately."""
+    frames = []
+    for root in roots:
+        runs = sorted(p for p in root.iterdir() if p.is_dir()) if root.exists() else []
+        frames += [
+            df.with_columns(source=pl.lit(root.name))
+            for r in runs
+            if (df := run_labels(r)) is not None
+        ]
     if not frames:
         return None
     return pl.concat(frames, how="diagonal_relaxed").sort("entry_decided_ts_ms")
@@ -139,6 +151,8 @@ def _side(df: pl.DataFrame) -> str:
 def report(df: pl.DataFrame) -> list[str]:
     n, wins = df.height, int(df["win"].sum())
     lo, hi = wilson(wins, n)
+    counts = df["source"].value_counts().sort("source").rows()
+    sources = ", ".join(f"{s}: {c:,}" for s, c in counts)
     return [
         "# Labelled outcomes",
         "",
@@ -146,7 +160,7 @@ def report(df: pl.DataFrame) -> list[str]:
         "conviction gates, bought the moment it qualified with V1's exits (+45% target, sell "
         "at the first price below entry) and the paper fill model. Paper trading only.",
         "",
-        f"- Tokens: {n:,} from {df['run'].n_unique()} run(s)",
+        f"- Tokens: {n:,} from {df['run'].n_unique()} run(s) ({sources})",
         f"- Win rate: {wins / n:.1%} [{lo:.1%}-{hi:.1%}]",
         f"- Expectancy: {df['net_return'].mean():.1%} per trade, before network costs",
         "",

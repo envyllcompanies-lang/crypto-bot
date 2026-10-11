@@ -59,6 +59,9 @@ This installs uv, Python 3.12 and the pinned packages, then runs the tests. It a
 | Update now (it also updates itself every 15 minutes) | `bash ~/crypto-bot/deploy/setup.sh` |
 | Update log | `journalctl -u crypto-bot-update` |
 | Stop / start | `sudo systemctl stop crypto-bot` / `sudo systemctl start crypto-bot` |
+| Backtest the downloaded history (background, capped at 450 MB) | `bash ~/crypto-bot/deploy/backtest.sh` |
+| Follow the backtest | `journalctl -u crypto-bot-backtest -f` |
+| Backtest report | `cd ~/crypto-bot && .venv/bin/python -m cryptobot.m6_report data/backtest/<folder>` |
 
 ## Optional: daily report pushed to GitHub
 

@@ -22,7 +22,7 @@ def test_labels_join_outcomes_to_features_and_narrative(tmp_path):
     eng = Engine([var], out=Sink(run, OUT_SCHEMAS))
     run_replay(eng, events)
 
-    df = build(tmp_path / "paper")
+    df = build((tmp_path / "paper",))
     assert df.height == 1
     row = df.row(0, named=True)
     assert row["mint"] == "Mint1111" and row["run"] == "run1"
@@ -30,11 +30,11 @@ def test_labels_join_outcomes_to_features_and_narrative(tmp_path):
     assert row["score"] is not None and row["pts_not_copycat"] == 20
     assert row["win"] == (row["pnl_lamports"] > 0)
     text = "\n".join(report(df))
-    assert "- Tokens: 1 from 1 run(s)" in text
+    assert "- Tokens: 1 from 1 run(s) (paper: 1)" in text
 
 
 def test_no_runs_means_no_labels(tmp_path):
-    assert build(tmp_path / "nothing") is None
+    assert build((tmp_path / "nothing",)) is None
 
 
 def test_split_table_compares_each_side_of_the_median():

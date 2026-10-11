@@ -60,6 +60,7 @@ from pathlib import Path
 import polars as pl
 
 from cryptobot.conviction import (
+    OFFLINE,
     Conviction,
     blocks,
     control_pick,
@@ -219,6 +220,7 @@ class Engine:
         self.variants = list(variants)
         self.out = out
         self.unlimited = unlimited_balance
+        self.offline = False  # backtest on data without lookups: conviction.OFFLINE
         self.balance = [start_balance] * len(self.variants)
         by_name = {v.universe.name: v.universe for v in self.variants}
         self.universes: list[Universe] = list(by_name.values())
@@ -234,6 +236,9 @@ class Engine:
         self.next_tick: dict[str, int] = {}
         self._tick = itertools.count()
         self.results: list[tuple[int, str, TradeResult]] = []
+        self.keep_results = True  # False for long backtests: trades are on disk anyway
+        self.closed_trades = 0
+        self.closed_pnl_lamports = 0
         self.gates: dict[tuple[str, str], bool] = {}
         self.columns: dict[str, dict[str, tuple[float, int]]] = {
             u.name: {} for u in self.universes if u.kind == "final_stretch"
@@ -453,6 +458,8 @@ class Engine:
         if u.kind == "conviction":
             row = self.lookups.get(tok.mint)
             lookup_ms = None if row is None or result is None else row["received_ms"]
+            if self.offline and result is None:
+                result, lookup_ms = OFFLINE, ts  # backtest: no lookups (conviction.OFFLINE)
             conv = conviction(tok, result, lookup_ms, ts)
             if conv is not None and u.narrative_gate:
                 assert result is not None
@@ -668,7 +675,10 @@ class Engine:
             exit_reason=reason,
             flags=flags + tuple(sorted(slot.flags - set(flags))),
         )
-        self.results.append((vi, tok.mint, result))
+        self.closed_trades += 1
+        self.closed_pnl_lamports += result.pnl_lamports
+        if self.keep_results:
+            self.results.append((vi, tok.mint, result))
         if not (self.unlimited or var.shadow):
             self.balance[vi] += proceeds
         slot.position = None
@@ -798,7 +808,7 @@ class Engine:
             "last_event_ms": self.clock,
             "stats": dict(self.stats),
             "variants": len(self.variants),
-            "closed_trades": len(self.results),
+            "closed_trades": self.closed_trades,
             # Cash in each paper wallet; open positions are in open_value_lamports.
             "final_balance_lamports": {
                 v.name: self.balance[i] for i, v in enumerate(self.variants)
@@ -1036,8 +1046,8 @@ def main(argv: list[str] | None = None) -> None:
         run_replay(engine, source)
     engine.summary_extra["running"] = False
     engine.write_summary()
-    pnl = sum(r.pnl_lamports for _, _, r in engine.results)
-    print(f"{run_dir}: {len(engine.results)} closed paper trades, {to_sol(pnl):+.4f} SOL in total")
+    pnl, n = engine.closed_pnl_lamports, engine.closed_trades
+    print(f"{run_dir}: {n} closed paper trades, {to_sol(pnl):+.4f} SOL in total")
 
 
 if __name__ == "__main__":

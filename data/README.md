@@ -28,7 +28,15 @@ import or execute them.
 - **Size:** about 363 GB in total. `trade` is 36.3 GB, `create` 0.6 GB, `swap` 277.5 GB.
 - **Licence: none stated.** The dataset has no README and no licence field. Use it for
   private research only, never redistribute it, and confirm terms before relying on it.
-- **Fetched so far:** one 12-hour sample (2026-09-12 15:14 to 2026-09-13 03:14 UTC):
+- **On the server (11 Oct 2026, the owner's OK for private research):** `trade` and
+  `create` for 25 Sep to 8 Oct 2026 (folders `2026-09_d25-end` and `2026-10_d01-12`,
+  54 files, 10.1 GB), for the M3 backtest (`backtest.py`, reading through `slinky.py`).
+  Within one transaction, trades on the same token are not always listed in the order
+  they ran; `slinky.chain_order` restores it from the reserves (on 7 Oct 16:00-17:00
+  this took tokens with a broken reserve chain from 100 to 0). Rows with zero SOL
+  reserves all belong to curves quoted in other assets (4,673 of 42,142 tokens on 7-8
+  Oct) and are dropped.
+- **First sample:** one 12-hour sample (2026-09-12 15:14 to 2026-09-13 03:14 UTC):
   ```
   uv run python -m cryptobot.fetch Slinky21/Pumpfun_v2_dataset \
     p01_2026-08_to_2026-11/2026-09_d13-24/trade/trade_20260913T031440.parquet \

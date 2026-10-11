@@ -452,3 +452,12 @@ def test_labels_enter_every_eligible_token_at_once_without_a_wallet(tmp_path):
     assert signals[0][1].startswith("conviction ") and signals[0][1].endswith(" label")
     assert len(eng.results) == 1
     assert eng.balance[0] == Engine([var]).balance[0]  # shadow: the wallet never moves
+
+
+def test_offline_conviction_for_backtests_without_lookups():
+    from cryptobot.conviction import OFFLINE
+
+    c = conviction(clean_token(), OFFLINE, NOW, NOW)
+    assert c is not None  # no lookup, yet not blocked
+    assert c.reasons["holders_differ"] == 4 and c.reasons["x_link"] == 1
+    assert c.score == BASE - 4 - 3  # half the holder points; X link not evaluated

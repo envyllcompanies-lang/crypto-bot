@@ -53,6 +53,10 @@ from cryptobot.features import TokenState
 from cryptobot.holders import balances_alike, funding_clustered
 
 MAX_AGE_MS = 40 * 60 * 1000
+# Backtests on historical data have no holder lookup (top-5 balances, funders, metadata).
+# This stands in for it: the funding block is skipped, the holder check scores half its
+# points and the X link scores as not evaluated. Live runs never use it.
+OFFLINE: dict = {"offline": True}
 
 NOT_COPYCAT = 20
 CREATOR_GRADUATE, CREATOR_SERIAL = 15, -10
@@ -123,7 +127,9 @@ def blocks(tok: TokenState, result: dict | None, lookup_ms: int | None, now_ms: 
         out.append("older_than_40m")
     if result is None or lookup_ms is None:
         out.append("no_lookup")
-    elif funding_clustered(result["funders"], result["first_ms"], lookup_ms):
+    elif not result.get("offline") and funding_clustered(
+        result["funders"], result["first_ms"], lookup_ms
+    ):
         out.append("funding_clustered")
     return out
 
@@ -152,7 +158,9 @@ def conviction(
         "climb": _linear(tok.trades_per_progress_pct, CLIMB_FULL, CLIMB_ZERO, CLIMB_POINTS),
         "dev_share": _linear(tok.dev_share, DEV_FULL, DEV_ZERO, DEV_POINTS),
         "insider_share": _linear(tok.insider_share, INSIDER_FULL, INSIDER_ZERO, INSIDER_POINTS),
-        "holders_differ": 0 if balances_alike(result["balances"]) else HOLDERS_DIFFER,
+        "holders_differ": HOLDERS_DIFFER / 2
+        if result.get("offline")
+        else (0 if balances_alike(result["balances"]) else HOLDERS_DIFFER),
         "no_bundle_candle": 0 if tok.bundle_candle else NO_BUNDLE_CANDLE,
         "pro_traders": PRO_POINTS * min(tok.pro_traders / PRO_FULL, 1.0),
         "x_link": X_POINTS.get(result.get("x_kind"), 0),
