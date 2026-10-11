@@ -41,3 +41,41 @@ def test_download_skips_file_of_right_size(raw):
     dest.parent.mkdir(parents=True)
     dest.write_bytes(b"abc")
     assert fetch.download("o/n", "a.parquet", 3) == dest
+
+
+def test_an_oversized_partial_file_is_downloaded_again(raw, monkeypatch):
+    import io
+
+    part = raw / "o__n" / "a.parquet.part"
+    part.parent.mkdir(parents=True)
+    part.write_bytes(b"abcabcabc")  # two downloads appended to it: 9 bytes, not 3
+    asked = []
+
+    def urlopen(req, timeout):
+        asked.append(req.get_header("Range"))
+        resp = io.BytesIO(b"abc")
+        resp.status = 200
+        return _Ctx(resp)
+
+    monkeypatch.setattr(fetch.urllib.request, "urlopen", urlopen)
+    dest = fetch.download("o/n", "a.parquet", 3)
+    assert dest.read_bytes() == b"abc" and asked == [None]  # whole file, no Range
+
+
+class _Ctx:
+    def __init__(self, resp):
+        self.resp = resp
+
+    def __enter__(self):
+        return self.resp
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_a_second_fetch_of_the_same_dataset_refuses_to_start(raw):
+    held = fetch.lock("o/n")
+    with pytest.raises(SystemExit, match="already running"):
+        fetch.lock("o/n")
+    held.close()
+    fetch.lock("o/n").close()  # free again once the first one ends

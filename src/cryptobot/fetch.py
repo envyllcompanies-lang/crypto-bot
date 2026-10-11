@@ -3,11 +3,14 @@
 Usage: uv run python -m cryptobot.fetch <dataset> [<path-prefix> ...]
 
 Files land in data/raw/<owner>__<name>/<path>. Existing files with the right size
-are skipped. Downloaded files are data only: never import or execute them.
+are skipped. Only one fetch runs per dataset at a time (a lock file), since two would
+append to the same partial file. Downloaded files are data only: never import or
+execute them.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import shutil
 import sys
@@ -41,6 +44,9 @@ def download(dataset: str, path: str, size: int, attempts: int = 8) -> Path:
         have = tmp.stat().st_size if tmp.exists() else 0
         if have == size:
             break
+        if have > size:  # corrupt, e.g. two downloads appended to it: start over
+            tmp.unlink()
+            have = 0
         req = urllib.request.Request(url, headers={"Range": f"bytes={have}-"} if have else {})
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
@@ -75,8 +81,21 @@ def ensure(dataset: str, prefixes: tuple[str, ...] = ("",)) -> Path:
     return root
 
 
+def lock(dataset: str):
+    """Hold an exclusive lock for this dataset, or exit if another fetch holds it."""
+    path = local_dir(dataset) / ".fetch.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit(f"another fetch of {dataset} is already running") from None
+    return handle
+
+
 def main(argv: list[str]) -> None:
     dataset, prefixes = argv[0], argv[1:] or [""]
+    held = lock(dataset)  # noqa: F841 (released when the process exits)
     files = [f for p in prefixes for f in list_files(dataset, p)]
     total = sum(f["size"] for f in files)
     print(f"{dataset}: {len(files)} files, {total / 1e9:.2f} GB")
