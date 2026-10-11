@@ -24,6 +24,7 @@ class DipBuyer:
     min_peak_multiple: float = 1.0  # all-time high must be at least this x launch price
     max_age_ms: int | None = 40 * 60 * 1000
     stall_ms: int | None = None  # sell if no exit after this long
+    quiet_ms: int | None = None  # sell if nobody has traded the token for this long
 
     def decide(self, view: View) -> Buy | Sell | None:
         pos = view.position
@@ -41,4 +42,6 @@ class DipBuyer:
             return Sell("stop")
         if self.stall_ms is not None and view.ts_ms - pos.entry_ts_ms >= self.stall_ms:
             return Sell("stall")
+        if self.quiet_ms is not None and view.quiet_ms >= self.quiet_ms:
+            return Sell("quiet")
         return None

@@ -116,7 +116,18 @@ def open_tape():
     return t
 
 
+def quiet_tape():
+    """A dump, our entry, then nobody trades for a minute before one last small buy."""
+    t = Tape()
+    t.buy(1_000, 10.0, user="whale")
+    t.sell(2_000, "whale")
+    t.buy(3_000, 0.2, user="a")
+    t.buy(63_000, 0.1, user="b")
+    return t
+
+
 TAPES = {
+    "quiet": quiet_tape,
     "bounce": bounce_tape,
     "crash": crash_tape,
     "graduation": graduation_tape,
@@ -126,6 +137,8 @@ STRATEGIES = {
     "v1_core": DipBuyer(to_lamports(0.25), drop=0.40, target=0.45, max_age_ms=None),
     "dip25_2x_sl20": DipBuyer(to_lamports(0.4), drop=0.25, target=1.0, stop_tolerance=0.20),
     "no_dip_stall": DipBuyer(to_lamports(1.0), drop=0.0, target=0.5, stall_ms=3_000),
+    "stall_on_clock": DipBuyer(to_lamports(0.25), drop=0.40, target=5.0, stall_ms=20_000),
+    "quiet_exit": DipBuyer(to_lamports(0.25), drop=0.40, target=5.0, quiet_ms=15_000),
 }
 
 
@@ -159,6 +172,27 @@ def test_parity_scenarios_are_not_vacuous():
     grad = replay(TAPES["graduation"]().trades, hold, cfg, 0)
     assert [r.flags for r in grad] == [("graduated",)]
     assert engine_results(TAPES["graduation"](), hold, cfg) == grad
+    # Time-based exits fire on the clock while nobody trades the token.
+    for name, reason in (("stall_on_clock", "stall"), ("quiet_exit", "quiet")):
+        [r] = replay(TAPES["quiet"]().trades, STRATEGIES[name], cfg, 0)
+        assert r.exit_reason == reason and r.exit_decided_ts_ms < 63_000
+
+
+def test_clock_exits_keep_firing_after_the_last_trade_until_the_data_ends():
+    t, s, cfg = open_tape(), STRATEGIES["quiet_exit"], FillConfig(delay_ms=1_000)
+    assert [r.exit_reason for r in replay(t.trades, s, cfg, 0)] == ["open_at_end"]
+    [r] = replay(t.trades, s, cfg, 0, end_ms=60_000)
+    assert r.exit_reason == "quiet" and r.exit_decided_ts_ms == 17_000
+
+    # In the paper engine, another token's trades move the clock on.
+    eng = Engine([Variant("v", ALL, s, cfg)], unlimited_balance=True)
+    eng.on_create(create_row())
+    for row in t.rows:
+        eng.on_trade(row)
+    eng.on_create(create_row(mint="Other", ts=59_000))
+    eng.on_trade({**t.rows[0], "mint": "Other", "received_ms": 60_000})
+    eng.finish()
+    assert [(r.exit_reason, r.exit_decided_ts_ms) for _, _, r in eng.results] == [("quiet", 17_000)]
 
 
 def test_wallet_too_small_skips_entry(tmp_path):

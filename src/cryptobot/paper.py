@@ -66,7 +66,7 @@ from cryptobot.features import CopycatWindow, TokenState, is_classic
 from cryptobot.holders import LOOKUP_SCHEMA, PUBLIC_RPC, TOP_N, LookupWorker, classify
 from cryptobot.narrative import make_judge
 from cryptobot.recorder import LIVE, PUBLIC_WS, SCHEMAS, Sink, next_seq, now_ms, record
-from cryptobot.replay import Buy, FillConfig, Position, Sell, TradeResult, View
+from cryptobot.replay import TICK_MS, Buy, FillConfig, Position, Sell, TradeResult, View
 from cryptobot.tracked import TRACKED_PATH, load_list
 from cryptobot.v1 import (
     FINAL_STRETCH_MAX_AGE_MS,
@@ -203,7 +203,10 @@ class Engine:
         self.slot_index: dict[str, set[int]] = defaultdict(set)
         # Slots with an order in flight, a position, or their own curve.
         self.active: dict[str, set[int]] = defaultdict(set)
-        self.queue: list[tuple[int, int, int, str]] = []
+        # (time, kind, order, variant, mint): kind 0 = clock tick of a token's open
+        # positions, 1 = an order landing. Ticks go first at equal times, as in replay.py.
+        self.queue: list[tuple[int, int, int, int, str]] = []
+        self.next_tick: dict[str, int] = {}
         self._tick = itertools.count()
         self.results: list[tuple[int, str, TradeResult]] = []
         self.gates: dict[tuple[str, str], bool] = {}
@@ -294,6 +297,7 @@ class Engine:
                 self.slot_index[mint].add(vi)
             if not slot.done:
                 self._decide(vi, var, tok, slot, ts, row, ok[var.universe.name])
+        self._schedule_tick(mint, ts)
 
     def on_gap(self, ts: int) -> None:
         """The stream dropped at `ts`: events after it may be missing."""
@@ -452,7 +456,7 @@ class Engine:
         reserved: int = 0,
     ) -> None:
         slot.pending = _Pending(order, ts, ts + delay, reserved)
-        heapq.heappush(self.queue, (ts + delay, next(self._tick), vi, mint))
+        heapq.heappush(self.queue, (ts + delay, 1, next(self._tick), vi, mint))
         self.active[mint].add(vi)
 
     def _advance(self, ts: int) -> None:
@@ -460,7 +464,10 @@ class Engine:
         if self.first_ts is None:
             self.first_ts = ts
         while self.queue and self.queue[0][0] < ts:
-            land, _, vi, mint = heapq.heappop(self.queue)
+            land, kind, _, vi, mint = heapq.heappop(self.queue)
+            if kind == 0:
+                self._tick_positions(mint, land)
+                continue
             slot = self.slots.get((vi, mint))
             if slot and slot.pending and slot.pending.land_ts_ms == land and not slot.done:
                 self._land(vi, mint, slot)
@@ -471,6 +478,40 @@ class Engine:
             elif ts - self.last_flush >= FLUSH_EVERY_MS:
                 self.flush()
                 self.last_flush = ts
+
+    def _schedule_tick(self, mint: str, after_ms: int) -> None:
+        """Re-check this token's open positions TICK_MS after `after_ms` if any are live."""
+        live = any(
+            (s := self.slots.get((vi, mint))) is not None
+            and not s.done
+            and (s.position is not None or s.pending is not None)
+            for vi in self.active.get(mint, ())
+        )
+        if not live:
+            self.next_tick.pop(mint, None)
+            return
+        t = after_ms + TICK_MS
+        self.next_tick[mint] = t
+        heapq.heappush(self.queue, (t, 0, next(self._tick), -1, mint))
+
+    def _tick_positions(self, mint: str, t: int) -> None:
+        """A clock check with no new trade: time-based exits can fire (replay.py ticks)."""
+        if self.next_tick.get(mint) != t or mint not in self.tokens:
+            return
+        tok = self.tokens[mint]
+        for vi in sorted(self.active.get(mint, ())):
+            slot = self.slots[(vi, mint)]
+            if slot.done or slot.position is None or slot.pending is not None:
+                continue
+            var = self.variants[vi]
+            curve = self._curve(slot, tok)
+            peak = slot.peak if slot.curve is not None else tok.peak_price
+            view = View(t, tok.created_ms, curve, peak, slot.position, False, tok.last_ts_ms)
+            action = var.strategy.decide(view)
+            if isinstance(action, Sell):
+                self._schedule(vi, mint, slot, action, t, var.fill.delay_ms)
+                self._decision(t, vi, mint, "signal_sell", action.reason, curve.price())
+        self._schedule_tick(mint, t)
 
     def _land(self, vi: int, mint: str, slot: _Slot) -> None:
         p, slot.pending = slot.pending, None

@@ -139,3 +139,10 @@ def test_engine_marks_copycats_on_create():
     eng.on_create(create_row(mint="m2", ts=5, name="Frog", symbol="pepe"))
     assert not eng.tokens["m1"].copycat and eng.tokens["m2"].copycat
     assert eng.stats["copycats"] == 1
+
+
+def test_every_default_variant_sells_a_token_gone_quiet():
+    from cryptobot.v1 import QUIET_MS
+
+    assert all(v.strategy.quiet_ms == QUIET_MS for v in default_variants())
+    assert all(v.describe()["quiet_ms"] == QUIET_MS for v in default_variants())

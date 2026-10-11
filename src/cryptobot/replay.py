@@ -13,6 +13,11 @@ The fill model:
 Recorded trades replay by their inputs: buys by the SOL that reached the curve,
 sells by the tokens sold. Amounts are lamports and raw token units throughout.
 
+Positions are also re-checked on a clock: every TICK_MS after the token's last
+recorded trade, with no new trade in between, the strategy sees the unchanged curve at
+the new time. That lets time-based exits (stall timer, a token gone quiet) fire on
+tokens nobody trades any more, as a real bot's timer would. paper.py ticks the same way.
+
 Not modelled yet: trading after graduation (PumpSwap). A position still open when
 the token graduates, or when the data ends, is valued by selling into the final
 curve state and flagged "graduated" or "open_at_end", so reports can separate it.
@@ -50,6 +55,7 @@ class FillConfig:
 
 
 DEFAULT_FILL = FillConfig()
+TICK_MS = 5_000
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,12 @@ class View:
     peak_price: float
     position: Position | None
     order_pending: bool
+    last_trade_ms: int | None = None  # the token's last recorded trade; None = this one
+
+    @property
+    def quiet_ms(self) -> int:
+        """Time since the token's last recorded trade."""
+        return 0 if self.last_trade_ms is None else self.ts_ms - self.last_trade_ms
 
     @property
     def age_ms(self) -> int:
@@ -199,8 +211,13 @@ def replay(
     cfg: FillConfig = DEFAULT_FILL,
     created_ts_ms: int | None = None,
     start: Curve | None = None,
+    end_ms: int | None = None,
 ) -> list[TradeResult]:
-    """Replay one token's trades from launch (or `start`) and return our closed trades."""
+    """Replay one token's trades from launch (or `start`) and return our closed trades.
+
+    `end_ms` is when the data ends (default: this token's last trade); clock checks of
+    an open position keep running until then.
+    """
     events = sorted(trades, key=lambda t: t.ts_ms)
     if not events:
         return []
@@ -209,7 +226,23 @@ def replay(
     peak = state.curve.price()
     last_ts = created
 
+    def ticks(until: int) -> None:
+        """Clock checks of an open position between the last trade and `until`."""
+        t = last_ts + TICK_MS
+        while t < until:
+            if state.pending and state.pending.land_ts_ms < t:
+                _land(state, cfg)
+            if state.curve.graduated:
+                return
+            if state.position is not None and state.pending is None:
+                view = View(t, created, state.curve, peak, state.position, False, last_ts)
+                action = strategy.decide(view)
+                if isinstance(action, Sell):
+                    state.pending = _Pending(action, t, t + cfg.delay_ms)
+            t += TICK_MS
+
     for ev in events:
+        ticks(ev.ts_ms)
         if state.pending and state.pending.land_ts_ms < ev.ts_ms:
             _land(state, cfg)
         if state.curve.graduated:
@@ -231,6 +264,8 @@ def replay(
         elif isinstance(action, Sell) and state.position is not None:
             state.pending = _Pending(action, ev.ts_ms, ev.ts_ms + cfg.delay_ms)
 
+    if end_ms is not None and not state.curve.graduated:
+        ticks(end_ms + 1)
     # Orders still in flight land after the last trade.
     if state.pending and not state.curve.graduated:
         _land(state, cfg)

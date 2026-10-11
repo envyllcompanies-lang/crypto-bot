@@ -52,6 +52,9 @@ STOP_TOLERANCES = (0.0, 0.20)  # 0 = V1's first price below entry; 0.20 = -20% s
 DEFAULT_DELAY_MS = 2_000
 DELAYS_MS = (1_000, 2_000, 5_000)
 STALL_MS = 10 * 60 * 1000
+# Not V1's rule: V1 sells below entry, but a token nobody trades never moves, so the
+# position would sit forever. Every variant sells after this long with no trade at all.
+QUIET_MS = 5 * 60 * 1000
 CORE = (0.40, 0.45, 0.0)  # V1's own method: 40% dip, +45% bounce, exit at entry
 
 # Filled in by the paper engine from a live lookup (holders.py); None until then.
@@ -171,6 +174,7 @@ class Variant:
             "target": getattr(s, "target", None),
             "stop_tolerance": getattr(s, "stop_tolerance", None),
             "stall_ms": getattr(s, "stall_ms", None),
+            "quiet_ms": getattr(s, "quiet_ms", None),
             "holder_sell": self.holder_sell,
             "conviction": self.conviction,
             "delay_ms": f.delay_ms,
@@ -206,6 +210,7 @@ def variant(
         min_peak_multiple=1.0,
         max_age_ms=None,  # the universe applies the age cap
         stall_ms=stall_ms,
+        quiet_ms=QUIET_MS,
     )
     return Variant("|".join(parts), u, strategy, FillConfig(delay_ms=delay_ms), holder_sell)
 
@@ -223,6 +228,7 @@ def conviction_variant(
         stop_tolerance=stop,
         min_peak_multiple=1.0,
         max_age_ms=None,
+        quiet_ms=QUIET_MS,
     )
     return Variant(name, u, strategy, FillConfig(delay_ms=delay_ms), conviction=True)
 
