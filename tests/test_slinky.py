@@ -111,3 +111,61 @@ def test_events_convert_order_and_drop_non_sol_curves(tmp_path):
     assert not tok.tainted
     ((kind, only),) = events(tmp_path, start=_t(1_800))  # the create is before the start
     assert kind == "trade" and {**only, "seq": 1} == t
+
+
+def test_parallel_backtest_parts_merge_into_one_run(tmp_path):
+    import json
+
+    from cryptobot.backtest import run_parallel
+
+    vsol, vtok = INITIAL_VIRTUAL_SOL, INITIAL_VIRTUAL_TOKENS
+
+    def create(mint, ms):
+        return {
+            "block_time": _t(ms),
+            "slot": ms // 400,
+            "tx_index": 0,
+            "signature": mint,
+            "mint": mint,
+            "bonding_curve": "bc",
+            "creator": "dev",
+            "tx_signer": "dev",
+            "token_name": mint,
+            "symbol": mint,
+            "uri": "u",
+            "token_program": "tp",
+            "is_mayhem_mode": False,
+            "token_total_supply": 10**15,
+            "real_token_reserves": 793_100_000_000_000,
+            "virtual_sol_reserves": vsol,
+            "virtual_token_reserves": vtok,
+            "ingested_at": _t(ms),
+        }
+
+    trade = {
+        "block_time": _t(1_000),
+        "slot": 2,
+        "tx_index": 1,
+        "signature": "s",
+        "mint": "zz",
+        "trade_user": "u",
+        "creator": "dev",
+        "ix_name": "sell",
+        "sol_amount": 0,
+        "token_amount": 1,
+        "virtual_sol_reserves": 0,  # non-SOL curve: dropped
+        "virtual_token_reserves": 1,
+        "real_sol_reserves": 0,
+        "real_token_reserves": 0,
+        "fee": 0,
+        "creator_fee": 0,
+        "ingested_at": _t(1_000),
+    }
+    day = 86_400_000
+    _write(tmp_path / "raw", "19700101T120000", [create("a", 1_000)], [trade])
+    _write(tmp_path / "raw", "19700102T120000", [create("b", day + 1)], [trade])
+    out = tmp_path / "bt"
+    merged = run_parallel(out, _t(0), _t(2 * day), 2, root=tmp_path / "raw")
+    assert merged["parts"] == 2 and merged["stats"]["creates"] == 2  # one launch per part
+    assert json.loads((out / "summary.json").read_text())["running"] is False
+    assert (out / "variants.json").exists() and not (out / "parts").exists()

@@ -221,6 +221,7 @@ class Engine:
         self.out = out
         self.unlimited = unlimited_balance
         self.offline = False  # backtest on data without lookups: conviction.OFFLINE
+        self.flush_every_ms = FLUSH_EVERY_MS  # event time between writes to disk
         self.balance = [start_balance] * len(self.variants)
         by_name = {v.universe.name: v.universe for v in self.variants}
         self.universes: list[Universe] = list(by_name.values())
@@ -573,7 +574,7 @@ class Engine:
         if self.out is not None:
             if self.last_flush is None:
                 self.last_flush = ts
-            elif ts - self.last_flush >= FLUSH_EVERY_MS:
+            elif ts - self.last_flush >= self.flush_every_ms:
                 self.flush()
                 self.last_flush = ts
 
