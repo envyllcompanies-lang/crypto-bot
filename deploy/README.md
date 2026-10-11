@@ -23,6 +23,20 @@ Click **Create**.
 
 In the instance list, click **SSH** next to `crypto-bot`. A terminal opens in your browser; no key files are needed.
 
+## Or: Oracle Cloud Always Free (preferred if you have an account)
+
+Oracle's Always Free tier is permanent; only its $300 trial credit ends after 30 days. Its Ampere machine has dedicated CPU and runs in Ashburn, Virginia, close to Solana's infrastructure.
+
+1. Check that the region shown at the top right of https://cloud.oracle.com is **US East (Ashburn)**. That's your home region, and Always Free machines run only there.
+2. Go to Menu → Compute → Instances → **Create instance** and set:
+   - **Image:** Canonical Ubuntu 24.04.
+   - **Shape:** Ampere `VM.Standard.A1.Flex`, 1 OCPU, 6 GB. It must show **"Always Free-eligible"**.
+   - **SSH keys:** "Generate a key pair for me" → **Save private key**.
+3. Click **Create**. If it says "Out of capacity", retry later or pick another availability domain. Copy the **Public IP address**.
+4. From your Mac's Terminal, run `chmod 600` on the key file, then:
+   `ssh -i ~/Downloads/YOUR-KEY.key ubuntu@PUBLIC_IP`
+5. Continue with step 4 below.
+
 ## 4. Install and start (on the server)
 
 ```bash
