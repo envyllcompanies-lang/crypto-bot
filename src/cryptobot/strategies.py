@@ -19,12 +19,13 @@ LAUNCH_PRICE = LAUNCH.price()
 class DipBuyer:
     stake_lamports: int
     drop: float = 0.40  # buy when price is this far below the all-time high
-    target: float = 0.45  # take profit this far above the average entry
+    target: float | None = 0.45  # take profit this far above the entry; None = no cap
     stop_tolerance: float = 0.0  # V1: sell at the first price below entry
     min_peak_multiple: float = 1.0  # all-time high must be at least this x launch price
     max_age_ms: int | None = 40 * 60 * 1000
     stall_ms: int | None = None  # sell if no exit after this long
     quiet_ms: int | None = None  # sell if nobody has traded the token for this long
+    trail: float | None = None  # sell once price is this far below its high since entry
 
     def decide(self, view: View) -> Buy | Sell | None:
         pos = view.position
@@ -36,10 +37,13 @@ class DipBuyer:
             if view.price <= view.peak_price * (1 - self.drop):
                 return Buy(self.stake_lamports, f"drop {self.drop:.0%} from high")
             return None
-        if view.price >= pos.entry_price * (1 + self.target):
+        if self.target is not None and view.price >= pos.entry_price * (1 + self.target):
             return Sell("target")
         if view.price < pos.entry_price * (1 - self.stop_tolerance):
             return Sell("stop")
+        high = view.high_since_entry
+        if self.trail is not None and high is not None and view.price <= high * (1 - self.trail):
+            return Sell("trail")
         if self.stall_ms is not None and view.ts_ms - pos.entry_ts_ms >= self.stall_ms:
             return Sell("stall")
         if self.quiet_ms is not None and view.quiet_ms >= self.quiet_ms:

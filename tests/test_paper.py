@@ -139,6 +139,9 @@ STRATEGIES = {
     "no_dip_stall": DipBuyer(to_lamports(1.0), drop=0.0, target=0.5, stall_ms=3_000),
     "stall_on_clock": DipBuyer(to_lamports(0.25), drop=0.40, target=5.0, stall_ms=20_000),
     "quiet_exit": DipBuyer(to_lamports(0.25), drop=0.40, target=5.0, quiet_ms=15_000),
+    "trail_no_cap": DipBuyer(
+        to_lamports(0.25), drop=0.0, target=None, stop_tolerance=0.20, trail=0.10
+    ),
 }
 
 

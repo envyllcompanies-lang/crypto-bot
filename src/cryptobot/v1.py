@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from cryptobot.costs import DIRECT, TERMINAL_REFERRAL, Venue
 from cryptobot.curve import implied_sol_price, to_lamports, usd_to_launch_multiple
 from cryptobot.features import TokenState
 from cryptobot.replay import FillConfig, Strategy
@@ -192,6 +193,7 @@ class Variant:
             "target": getattr(s, "target", None),
             "stop_tolerance": getattr(s, "stop_tolerance", None),
             "stall_ms": getattr(s, "stall_ms", None),
+            "trail": getattr(s, "trail", None),
             "quiet_ms": getattr(s, "quiet_ms", None),
             "holder_sell": self.holder_sell,
             "conviction": self.conviction,
@@ -295,3 +297,42 @@ SCALP_STOPS = (0.0, 0.05, 0.10)
 def scalp_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
     u = labels_universe(max_stake)
     return [conviction_variant(u, t, s, shadow=True) for t in SCALP_TARGETS for s in SCALP_STOPS]
+
+
+# Letting winners run (11 Oct 2026): no profit cap, a stop below entry, and a trailing stop
+# that sells once the price falls this far from its high since entry. Shadow variants on
+# every eligible token, like the scalp grid.
+TRAILS = (0.10, 0.20, 0.30, 0.50)
+TRAIL_STOPS = (0.10, 0.20)
+
+
+def trail_variant(
+    u: Universe, trail: float, stop: float, shadow: bool = True, venue: Venue = TERMINAL_REFERRAL
+) -> Variant:
+    name = f"{u.name}|trail{round(trail * 100)}|sl{round(stop * 100)}|d{DEFAULT_DELAY_MS // 1000}s"
+    if venue is not TERMINAL_REFERRAL:
+        name += "|direct" if venue is DIRECT else f"|{venue.name}"
+    strategy = DipBuyer(
+        u.stake_lamports,
+        drop=0.0,
+        target=None,
+        stop_tolerance=stop,
+        min_peak_multiple=1.0,
+        max_age_ms=None,
+        quiet_ms=QUIET_MS,
+        trail=trail,
+    )
+    fill = FillConfig(delay_ms=DEFAULT_DELAY_MS, venue=venue)
+    return Variant(name, u, strategy, fill, conviction=True, shadow=shadow)
+
+
+def trail_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
+    """Each trail and stop, through Terminal (as every other variant) and direct to the
+    program (the lower fee a bot sending its own transactions would pay)."""
+    u = labels_universe(max_stake)
+    return [
+        trail_variant(u, t, s, venue=v)
+        for v in (TERMINAL_REFERRAL, DIRECT)
+        for t in TRAILS
+        for s in TRAIL_STOPS
+    ]

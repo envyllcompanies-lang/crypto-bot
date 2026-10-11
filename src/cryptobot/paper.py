@@ -209,6 +209,7 @@ class _Slot:
     done: bool = False
     watch: str | None = None  # largest holder at entry, for the holder-sells exit
     flags: set[str] = field(default_factory=set)
+    high: float | None = None  # best price since our position filled
 
 
 class Engine:
@@ -317,6 +318,8 @@ class Engine:
             else:
                 slot.curve, _ = slot.curve.after_sell(row["token_amount"])
             slot.peak = max(slot.peak, slot.curve.price())
+            if slot.high is not None:
+                slot.high = max(slot.high, slot.curve.price())
             if slot.curve.graduated:
                 self._close_out(vi, mint, slot, "graduated")
 
@@ -509,7 +512,9 @@ class Engine:
             return
         curve = self._curve(slot, tok)
         peak = slot.peak if slot.curve is not None else tok.peak_price
-        view = View(ts, tok.created_ms, curve, peak, slot.position, False)
+        view = View(
+            ts, tok.created_ms, curve, peak, slot.position, False, high_since_entry=slot.high
+        )
         if slot.position is None:
             if not gate_ok or slot.entries >= var.fill.max_trades_per_token:
                 return
@@ -609,7 +614,9 @@ class Engine:
             var = self.variants[vi]
             curve = self._curve(slot, tok)
             peak = slot.peak if slot.curve is not None else tok.peak_price
-            view = View(t, tok.created_ms, curve, peak, slot.position, False, tok.last_ts_ms)
+            view = View(
+                t, tok.created_ms, curve, peak, slot.position, False, tok.last_ts_ms, slot.high
+            )
             action = var.strategy.decide(view)
             if isinstance(action, Sell):
                 self._schedule(vi, mint, slot, action, t, var.fill.delay_ms)
@@ -647,6 +654,7 @@ class Engine:
             p.land_ts_ms, tokens, cost, spent / tokens, p.decided_ts_ms, order.reason
         )
         slot.entries += 1
+        slot.high = curve.price()
         if not (self.unlimited or var.shadow):
             self.balance[vi] += p.reserved - cost
         slot.watch = tok.largest_holder()[0]
@@ -687,6 +695,7 @@ class Engine:
         if not (self.unlimited or var.shadow):
             self.balance[vi] += proceeds
         slot.position = None
+        slot.high = None
         slot.flags.clear()
         self._decision(p.land_ts_ms, vi, tok.mint, "fill_sell", reason, result.exit_price)
         self._emit(

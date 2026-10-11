@@ -90,6 +90,7 @@ class View:
     position: Position | None
     order_pending: bool
     last_trade_ms: int | None = None  # the token's last recorded trade; None = this one
+    high_since_entry: float | None = None  # our position's best price since it filled
 
     @property
     def quiet_ms(self) -> int:
@@ -146,6 +147,7 @@ class _State:
     pending: _Pending | None = None
     results: list[TradeResult] = field(default_factory=list)
     entries: int = 0
+    high: float | None = None  # best price since our position filled
 
 
 def _fee(lamports: int, venue: Venue) -> int:
@@ -164,6 +166,7 @@ def _fill_buy(state: _State, p: _Pending, cfg: FillConfig) -> None:
     state.position = Position(
         p.land_ts_ms, tokens, cost, spent / tokens, p.decided_ts_ms, order.reason
     )
+    state.high = curve.price()
     state.entries += 1
 
 
@@ -192,6 +195,7 @@ def _fill_sell(state: _State, p: _Pending, cfg: FillConfig, flags: tuple[str, ..
         )
     )
     state.position = None
+    state.high = None
 
 
 def _land(state: _State, cfg: FillConfig) -> None:
@@ -235,7 +239,9 @@ def replay(
             if state.curve.graduated:
                 return
             if state.position is not None and state.pending is None:
-                view = View(t, created, state.curve, peak, state.position, False, last_ts)
+                view = View(
+                    t, created, state.curve, peak, state.position, False, last_ts, state.high
+                )
                 action = strategy.decide(view)
                 if isinstance(action, Sell):
                     state.pending = _Pending(action, t, t + cfg.delay_ms)
@@ -253,10 +259,20 @@ def replay(
             state.curve, _ = state.curve.after_sell(ev.token_raw)
         last_ts = ev.ts_ms
         peak = max(peak, state.curve.price())
+        if state.high is not None:
+            state.high = max(state.high, state.curve.price())
         if state.curve.graduated:
             break
 
-        view = View(ev.ts_ms, created, state.curve, peak, state.position, state.pending is not None)
+        view = View(
+            ev.ts_ms,
+            created,
+            state.curve,
+            peak,
+            state.position,
+            state.pending is not None,
+            high_since_entry=state.high,
+        )
         action = None if state.pending else strategy.decide(view)
         if isinstance(action, Buy) and state.position is None:
             if state.entries < cfg.max_trades_per_token:
