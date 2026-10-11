@@ -203,3 +203,42 @@ def test_replay_with_recorded_narrative_matches_live(tmp_path):
     ((_, _, trade),) = live.results
     assert trade.entry_reason == "conviction 90 very_high"
     assert replayed.summary()["equity_lamports"] == live.summary()["equity_lamports"]
+
+
+def test_report_shows_v1_as_stated_tiers_and_spot_checks(tmp_path):
+    from cryptobot.m6_report import report
+    from cryptobot.v1 import CORE, universes, variant
+
+    events = tmp_path / "events"
+    sink = Sink(events, EVENT_SCHEMAS)
+    name = "Evil | [click](https://x.example) **coin** with a very long name indeed"
+    sink.add("create", [create_row(name=name, symbol="EVL|")])
+    sink.add("trade", [dict(r, timestamp=r["received_ms"] // 1000) for r in dump_tape().rows])
+    result = {**with_narrative(5), "x_link": "https://x.com/i/communities/9"}
+    sink.add("lookups", [lookup_row(result, LOOKUP_MS)])
+    sink.flush()
+
+    run = tmp_path / "run"
+    run.mkdir()
+    conv = conviction_variant(conviction_universe(), target=0.45, stop=0.0)
+    variants = [variant(u, *CORE) for u in universes()[:2]] + [conv]
+    (run / "variants.json").write_text(json.dumps([v.describe() for v in variants]))
+    eng = Engine(variants, out=Sink(run, OUT_SCHEMAS))
+    eng.summary_path = run / "summary.json"
+    eng.summary_extra = {"mode": "replay", "source": str(events), "running": False}
+    run_replay(eng, events)
+    text = "\n".join(report(run))
+    assert text.index("## V1 as stated") < text.index("## Run") < text.index("## Experiments")
+    assert "| new_pairs | dip40\\|tp45\\|sl0\\|d2s | 1 |" in text
+    # Shown even with no trades: Final Stretch takes none in a run's first 40 minutes.
+    assert "| final_stretch_50 | dip40\\|tp45\\|sl0\\|d2s | 0 | n/a" in text
+    assert "| conviction | tp45\\|sl0\\|d2s | 1 |" in text
+    assert "| very_high | 1 |" in text and "| good | 0 | n/a | n/a |" in text
+    spot = text[text.index("## Spot-check list") :]
+    row = next(line for line in spot.splitlines() if "`Mint1111`" in line)
+    assert "| `Evil \\| [click](https://x.example) **coin` (`EVL\\|`) |" in row
+    assert "community `https://x.com/i/communities/9`" in row
+    assert "| 90 very_high | 5/5 `t` |" in row
+    assert "| final_stretch_50 | n/a | n/a | n/a | n/a |" in text  # no network-cost data
+    summary = json.loads((run / "summary.json").read_text())
+    assert summary["equity_lamports"] == summary["final_balance_lamports"]  # all closed

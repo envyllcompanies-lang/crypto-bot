@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +21,10 @@ from cryptobot.paper import PAPER, read_table
 from cryptobot.v1 import CORE, NOT_EVALUATED, V1_LAUNCH_USD
 
 LAG_HOURS_SHOWN = 48
+SPOT_CHECKS = 25
+TEXT_MAX_CHARS = 40  # creator-written names, cut to this
+TIERS = ("very_high", "good", "average")
+CONVICTION_REASON = re.compile(r"^conviction (\d+) (\w+)$")
 MIN_TRADES = 30  # below this many closed trades a variant's numbers are anecdotes
 NETWORK_LEVELS_SOL = (0.0, 0.0001, 0.0005, 0.001)  # priority fee + tip per transaction
 Z95 = 1.959964
@@ -99,6 +104,32 @@ def core_name() -> str:
     return f"dip{drop}|tp{target}|sl{stop}|d2s"
 
 
+def _sol(lamports: int | None) -> str:
+    return "n/a" if lamports is None else f"{lamports / to_lamports(1):.4f}"
+
+
+def md_text(value: object, limit: int = TEXT_MAX_CHARS) -> str:
+    """Untrusted creator text for a markdown table cell: one line, cut short, inside a code
+    span so links, emphasis and HTML show as plain text. Pipes are escaped because GFM
+    tables split cells on them even inside code spans."""
+    if not isinstance(value, str) or not value.replace("`", "").strip():
+        return "n/a"
+    text = " ".join(value.replace("`", "").split())[:limit]
+    return "`" + text.replace("\\", "/").replace("|", "\\|") + "`"
+
+
+def md_code(value: object, limit: int = 120) -> str:
+    """A link or mint as inline code, with no spaces; never a clickable link."""
+    if not isinstance(value, str):
+        return "n/a"
+    return md_text("".join(value.split()), limit)
+
+
+def md_cell(value: str) -> str:
+    """Our own text (variant names) in a table cell: escape the pipes in it."""
+    return value.replace("|", "\\|")
+
+
 def variant_table(trades: pl.DataFrame) -> pl.DataFrame:
     win = pl.col("pnl_lamports") > 0
     return (
@@ -116,11 +147,162 @@ def variant_table(trades: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+RESULT_HEADER = [
+    "| Universe | Variant | Trades | Win rate [95% CI] | Avg win | Avg loss | Expectancy "
+    "| PnL (SOL) | Cash (SOL) | Open (SOL) | Equity (SOL) | Flagged |",
+    "|---|---|---|---|---|---|---|---|---|---|---|---|",
+]
+
+
+def result_rows(
+    table: pl.DataFrame | None, summary: dict, names: list[tuple[str, str]] | None = None
+) -> list[str]:
+    """Markdown rows of variant results; `names` lists (universe, variant) to show, in
+    order, including variants that closed no trades."""
+    cash = summary.get("final_balance_lamports", {})
+    open_ = summary.get("open_value_lamports", {})
+    equity = summary.get("equity_lamports", {})
+    rows = {} if table is None else {row[1]: row for row in table.iter_rows()}
+    order = names if names is not None else [(row[0], name) for name, row in rows.items()]
+    out = []
+    for u, name in order:
+        wallet = (
+            f"| {_sol(cash.get(name))} | {_sol(open_.get(name, 0))} "
+            f"| {_sol(equity.get(name, cash.get(name)))} "
+        )
+        short = md_cell(name.removeprefix(f"{u}|"))
+        if name not in rows:
+            out.append(f"| {u} | {short} | 0 | n/a | n/a | n/a | n/a | +0.0000 {wallet}| 0 |")
+            continue
+        _, _, n, wins, avg_win, avg_loss, exp, pnl, flagged = rows[name]
+        lo, hi = wilson(wins, n)
+        out.append(
+            f"| {u} | {short} | {n} | {_pct(wins / n)} [{_pct(lo)}-{_pct(hi)}] "
+            f"| {_pct(avg_win)} | {_pct(avg_loss)} | {_pct(exp)} "
+            f"| {pnl / to_lamports(1):+.4f} {wallet}| {flagged} |"
+        )
+    return out
+
+
+def headline_variants(variants: list[dict]) -> list[tuple[str, str]]:
+    """V1's core rule in each V1 universe, then every conviction variant."""
+    core = core_name()
+    out = [
+        (v["universe"], v["name"])
+        for v in variants
+        if v["kind"] in ("new_pairs", "final_stretch") and v["name"] == f"{v['universe']}|{core}"
+    ]
+    return out + [(v["universe"], v["name"]) for v in variants if v.get("conviction")]
+
+
+def tier_section(trades: pl.DataFrame | None, conviction_names: set[str]) -> list[str]:
+    lines = [
+        "## Conviction by tier",
+        "",
+        "Closed trades of the conviction variants, by the tier the token had when the entry "
+        "was decided. Win rate with a 95% Wilson interval; expectancy is the mean net return.",
+        "",
+    ]
+    sub = None
+    if trades is not None and conviction_names:
+        sub = trades.filter(pl.col("variant").is_in(list(conviction_names)))
+    if sub is None or sub.is_empty():
+        return [*lines, "No conviction trades closed in this run.", ""]
+    tier = pl.col("entry_reason").str.extract(r"^conviction \d+ (\w+)$")
+    table = (
+        sub.with_columns(tier=tier)
+        .group_by("tier")
+        .agg(n=pl.len(), wins=(pl.col("pnl_lamports") > 0).sum(), exp=pl.col("net_return").mean())
+    )
+    found = {t: (n, w, e) for t, n, w, e in table.iter_rows()}
+    lines += ["| Tier | Trades | Win rate [95% CI] | Expectancy |", "|---|---|---|---|"]
+    for t in TIERS:
+        if t not in found:
+            lines.append(f"| {t} | 0 | n/a | n/a |")
+            continue
+        n, wins, exp = found[t]
+        lo, hi = wilson(wins, n)
+        lines.append(f"| {t} | {n} | {_pct(wins / n)} [{_pct(lo)}-{_pct(hi)}] | {_pct(exp)} |")
+    return [*lines, ""]
+
+
+def _features_before(gates: pl.DataFrame | None, mint: str, ts: int, universe=None) -> dict:
+    """The token's features from its last gates row at or before `ts`."""
+    if gates is None:
+        return {}
+    rows = gates.filter((pl.col("mint") == mint) & (pl.col("ts_ms") <= ts))
+    if universe is not None:
+        rows = rows.filter(pl.col("universe") == universe)
+    if rows.is_empty():
+        return {}
+    return json.loads(rows.sort("ts_ms")["features"][-1])
+
+
+def spot_check_section(
+    decisions: pl.DataFrame | None,
+    trades: pl.DataFrame | None,
+    gates: pl.DataFrame | None,
+    names: list[tuple[str, str]],
+) -> list[str]:
+    lines = [
+        "## Spot-check list",
+        "",
+        f"The last {SPOT_CHECKS} entries by the variants above, to check by hand in Axiom or "
+        "Padre. Token names, symbols and X links are written by the token's creator: they are "
+        "shown as text, never followed. A listing is not a recommendation.",
+        "",
+    ]
+    wanted = {name for _, name in names}
+    if decisions is None:
+        return [*lines, "No entries in this run.", ""]
+    fills = decisions.filter((pl.col("kind") == "fill_buy") & pl.col("variant").is_in(wanted))
+    if fills.is_empty():
+        return [*lines, "No entries in this run.", ""]
+    fills = fills.sort("ts_ms").tail(SPOT_CHECKS).reverse()
+    exits: dict[tuple[str, str, int], tuple[str, float]] = {}
+    if trades is not None:
+        for v, m, ts, why, ret in trades.select(
+            "variant", "mint", "entry_ts_ms", "exit_reason", "net_return"
+        ).iter_rows():
+            exits[(v, m, ts)] = (why, ret)
+    lines += [
+        "| Entry (UTC) | Variant | Mint | Token | X link | Conviction | Narrative | Exit "
+        "| Net return |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for ts, variant, mint, reason in fills.select("ts_ms", "variant", "mint", "reason").iter_rows():
+        feats = _features_before(gates, mint, ts)
+        token = f"{md_text(feats.get('name'))} ({md_text(feats.get('symbol'))})"
+        x_link = md_code(feats.get("x_link")) if feats.get("x_kind") not in (None, "none") else ""
+        x_cell = f"{feats.get('x_kind') or 'n/a'} {x_link}".strip()
+        match = CONVICTION_REASON.match(reason or "")
+        if match:
+            conv = f"{match[1]} {match[2]}"
+        else:
+            c = _features_before(gates, mint, ts, "conviction").get("conviction") or {}
+            conv = f"{c['score']} {c['tier']}" if "score" in c else "n/a"
+        narrative = feats.get("narrative")
+        story = (
+            f"{narrative['score']}/5 {md_text(narrative.get('theme'), 60)}"
+            if narrative
+            else "not evaluated"
+        )
+        why, ret = exits.get((variant, mint, ts), ("open", None))
+        lines.append(
+            f"| {_ts(ts)} | {md_cell(variant)} | {md_code(mint)} | {token} | {x_cell} | {conv} "
+            f"| {story} | {why} | {_pct(ret)} |"
+        )
+    return [*lines, ""]
+
+
 def report(run: Path) -> list[str]:
     summary = json.loads((run / "summary.json").read_text())
     variants = json.loads((run / "variants.json").read_text())
     trades, gates = read_table(run, "trades"), read_table(run, "gates")
+    decisions = read_table(run, "decisions")
     stats = summary["stats"]
+    headline = headline_variants(variants)
+    conviction_names = {v["name"] for v in variants if v.get("conviction")}
     lines = [
         f"# M6: paper trading, run {run.name}",
         "",
@@ -144,6 +326,7 @@ def report(run: Path) -> list[str]:
         f"| Tokens with a missed trade | {stats.get('tainted_missed_trade', 0):,} |",
         f"| Holder and X-link lookups done | {stats.get('lookups_done', 0):,} |",
         f"| Lookups that failed (checks not evaluated) | {stats.get('lookup_errors', 0):,} |",
+        f"| Copycat launches (name or symbol seen in 24 h) | {stats.get('copycats', 0):,} |",
         f"| Variants | {summary['variants']} |",
         f"| Closed paper trades | {summary['closed_trades']:,} |",
         "",
@@ -160,29 +343,38 @@ def report(run: Path) -> list[str]:
         counts = gates.filter(pl.col("passed")).group_by("universe").agg(pl.col("mint").n_unique())
         passed = dict(counts.iter_rows())
     lines += [f"| {u} | {passed.get(u, 0):,} |" for u in universes]
-    lines += ["", *lag_section(Path(summary["source"]))]
+    lines += [""]
 
-    lines += ["## Results by variant", ""]
-    if trades is None or trades.is_empty():
-        return [*lines, "No paper trades closed in this run.", "", *caveats(0)]
-    table = variant_table(trades)
-    lines += [
-        "Win rate with a 95% Wilson interval. Expectancy is the mean net return per trade after "
-        f"fees, before network costs. Variants with fewer than {MIN_TRADES} trades are anecdotes.",
+    has_trades = trades is not None and not trades.is_empty()
+    table = variant_table(trades) if has_trades else None
+    explain = [
+        "Win rate with a 95% Wilson interval. Expectancy is the mean net return per closed "
+        f"trade after fees, before network costs. Variants with fewer than {MIN_TRADES} trades "
+        "are anecdotes. Cash is the paper wallet's SOL, Open what its open positions would "
+        "fetch if sold into the current curve after fees, Equity the two together.",
         "",
-        "| Universe | Variant | Trades | Win rate [95% CI] | Avg win | Avg loss | Expectancy "
-        "| PnL (SOL) | Wallet (SOL) | Flagged |",
-        "|---|---|---|---|---|---|---|---|---|---|",
     ]
-    wallets = summary.get("final_balance_lamports", {})
-    for u, name, n, wins, avg_win, avg_loss, exp, pnl, flagged in table.iter_rows():
-        lo, hi = wilson(wins, n)
-        lines.append(
-            f"| {u} | {name.removeprefix(f'{u}|')} | {n} | {_pct(wins / n)} "
-            f"[{_pct(lo)}-{_pct(hi)}] | {_pct(avg_win)} | {_pct(avg_loss)} | {_pct(exp)} "
-            f"| {pnl / to_lamports(1):+.4f} | {wallets.get(name, 0) / to_lamports(1):.4f} "
-            f"| {flagged} |"
-        )
+    v1_lines = [
+        "## V1 as stated",
+        "",
+        f"V1's core rule ({core_name()}: 40% dip, +45% target, exit at the first price below "
+        "entry, 2 s delay) in each V1 universe, and the conviction variants (entry drop from "
+        "the token's conviction tier, V1's exits).",
+        "",
+        *explain,
+        *RESULT_HEADER,
+        *result_rows(table, summary, headline),
+        "",
+        *tier_section(trades, conviction_names),
+        *spot_check_section(decisions, trades, gates, headline),
+    ]
+    lines = lines[:5] + v1_lines + lines[5:]  # right after the title block
+    lines += lag_section(Path(summary["source"]))
+
+    lines += ["## Experiments: every variant", ""]
+    if table is None:
+        return [*lines, "No paper trades closed in this run.", "", *caveats(0)]
+    lines += [*explain, *RESULT_HEADER, *result_rows(table, summary)]
     idle = len(variants) - table.height
     lines += ["", f"{idle} of {len(variants)} variants closed no trades.", ""]
 
@@ -196,7 +388,7 @@ def report(run: Path) -> list[str]:
         "| Universe | " + " | ".join(f"{x:g} SOL/tx" for x in NETWORK_LEVELS_SOL) + " |",
         "|---|" + "---|" * len(NETWORK_LEVELS_SOL),
     ]
-    for u in universes:
+    for u in [v["universe"] for v in variants if v["name"] == f"{v['universe']}|{core}"]:
         sub = trades.filter(pl.col("variant") == f"{u}|{core}")
         cells = []
         for level in NETWORK_LEVELS_SOL:
@@ -235,6 +427,12 @@ def caveats(n_trades: int) -> list[str]:
         "market-cap ranking needs every token up to 40 minutes old.",
         "- The funnel counts tokens whose rules passed at least once; the gates table logs only "
         "changes between pass and fail.",
+        "- Conviction (conviction.py) is our own proposal on top of V1, not V1's rule. Its "
+        "weights and tier cut-offs are first guesses to be tuned on these results. Its "
+        "narrative score comes from a free LLM tier (Groq, then Gemini) and is 'not evaluated' "
+        "(a neutral score) when no key is set, a call fails or a free quota runs out.",
+        "- Copycats are counted against launches seen since the run started, so a run's first "
+        "24 hours find fewer of them.",
         "",
     ]
 
