@@ -142,6 +142,8 @@ def report(run: Path) -> list[str]:
         f"| Tokens that graduated | {stats.get('graduated', 0):,} |",
         f"| Stream gaps | {stats.get('gaps', 0):,} |",
         f"| Tokens with a missed trade | {stats.get('tainted_missed_trade', 0):,} |",
+        f"| Holder and X-link lookups done | {stats.get('lookups_done', 0):,} |",
+        f"| Lookups that failed (checks not evaluated) | {stats.get('lookup_errors', 0):,} |",
         f"| Variants | {summary['variants']} |",
         f"| Closed paper trades | {summary['closed_trades']:,} |",
         "",
@@ -169,15 +171,17 @@ def report(run: Path) -> list[str]:
         f"fees, before network costs. Variants with fewer than {MIN_TRADES} trades are anecdotes.",
         "",
         "| Universe | Variant | Trades | Win rate [95% CI] | Avg win | Avg loss | Expectancy "
-        "| PnL (SOL) | Flagged |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| PnL (SOL) | Wallet (SOL) | Flagged |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
+    wallets = summary.get("final_balance_lamports", {})
     for u, name, n, wins, avg_win, avg_loss, exp, pnl, flagged in table.iter_rows():
         lo, hi = wilson(wins, n)
         lines.append(
             f"| {u} | {name.removeprefix(f'{u}|')} | {n} | {_pct(wins / n)} "
             f"[{_pct(lo)}-{_pct(hi)}] | {_pct(avg_win)} | {_pct(avg_loss)} | {_pct(exp)} "
-            f"| {pnl / to_lamports(1):+.4f} | {flagged} |"
+            f"| {pnl / to_lamports(1):+.4f} | {wallets.get(name, 0) / to_lamports(1):.4f} "
+            f"| {flagged} |"
         )
     idle = len(variants) - table.height
     lines += ["", f"{idle} of {len(variants)} variants closed no trades.", ""]
@@ -216,9 +220,11 @@ def caveats(n_trades: int) -> list[str]:
         "a running session are not counted until they close.",
         "- Fills are simulated: our orders land after the delay on the curve other traders "
         "left, with our own price impact, but nobody reacts to our trades.",
-        "- V1 checks not evaluated (they need extra RPC calls or metadata): "
+        "- V1's X-link and top-5 holder checks are looked up once per candidate; entries "
+        "wait for the answer, and a failed lookup leaves those checks not evaluated. "
+        "Not evaluated at all: "
         + ", ".join(NOT_EVALUATED)
-        + ". Results are V1 without them.",
+        + " (needs a curated wallet list). Each variant starts with a 1 SOL wallet.",
         f"- Proxies: 'pro traders' are wallets that bought at least {pro_sol:g} SOL of the "
         f"token; a bundle launch candle is a run to {BUNDLE_CANDLE_MULT:g}x launch before any "
         f"sell; dollar levels assume V1's launch at ${V1_LAUNCH_USD:,}.",

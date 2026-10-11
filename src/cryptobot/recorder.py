@@ -75,6 +75,11 @@ class ConsumerError(RuntimeError):
     """A callback failed. Stop recording instead of treating it as a dropped connection."""
 
 
+def next_seq() -> int:
+    """The next arrival number, shared by every event this process records."""
+    return next(_SEQ)
+
+
 def now_ms() -> int:
     return time.time_ns() // 1_000_000
 

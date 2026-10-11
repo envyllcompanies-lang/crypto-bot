@@ -29,6 +29,9 @@ Beyond replay.py:
   order is sent.
 - Tokens are tracked only from their create event, so Final Stretch entries wait until
   the run is 40 minutes old: before then the column's market-cap ranking is incomplete.
+- V1's X-link and top-5 holder checks are looked up live (holders.py) once a token
+  passes every other rule, and entries wait for the answer. The answers are saved with
+  the run's events, so a replay sees exactly what the live run saw.
 - Results carry flags: "gap" when the stream dropped while the order or position was
   open, and "missed_trade" when the token's reserves skipped a trade. Tainted tokens
   get no new entries.
@@ -43,7 +46,7 @@ import itertools
 import json
 import os
 from collections import Counter, defaultdict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,7 +56,8 @@ import polars as pl
 from cryptobot.costs import Venue
 from cryptobot.curve import Curve, to_lamports, to_sol
 from cryptobot.features import TokenState, is_classic
-from cryptobot.recorder import LIVE, PUBLIC_WS, Sink, record
+from cryptobot.holders import LOOKUP_SCHEMA, PUBLIC_RPC, TOP_N, LookupWorker, classify
+from cryptobot.recorder import LIVE, PUBLIC_WS, SCHEMAS, Sink, next_seq, now_ms, record
 from cryptobot.replay import Buy, Position, Sell, TradeResult, View
 from cryptobot.v1 import (
     FINAL_STRETCH_MAX_AGE_MS,
@@ -109,6 +113,9 @@ OUT_SCHEMAS = {
         "features": pl.Utf8,  # JSON: TokenState.snapshot()
     },
 }
+
+
+EVENT_SCHEMAS = {**SCHEMAS, "lookups": LOOKUP_SCHEMA}
 
 
 def _fee(lamports: int, venue: Venue) -> int:
@@ -167,6 +174,12 @@ class Engine:
         self.first_ts: int | None = None
         self.clock = 0
         self.last_flush: int | None = None
+        # Lookups for V1's X-link and holder checks. Live mode sets request_lookup;
+        # replay feeds recorded answers through on_lookup.
+        self.holder_checks = False
+        self.request_lookup: Callable[[str, list[str], str, int], None] | None = None
+        self.lookups: dict[str, dict] = {}
+        self.requested: set[str] = set()
         # Rewritten on every flush, so a report can read a run that is still going.
         self.summary_path: Path | None = None
         self.summary_extra: dict = {}
@@ -247,6 +260,13 @@ class Engine:
             ts, None, None, "gap", "stream dropped; open tokens get no new entries", None
         )
 
+    def on_lookup(self, row: dict) -> None:
+        """A recorded or live answer to a lookup request."""
+        self._advance(row["received_ms"])
+        self.stats["lookups_done" if row["error"] is None else "lookup_errors"] += 1
+        if row["mint"] in self.tokens:
+            self.lookups[row["mint"]] = row
+
     def finish(self) -> None:
         """End of data: land orders in flight, then value open positions."""
         for (vi, mint), slot in list(self.slots.items()):
@@ -281,6 +301,17 @@ class Engine:
             assert self.first_ts is not None
             checks["column_complete"] = ts - self.first_ts >= FINAL_STRETCH_MAX_AGE_MS
             checks["column_bottom_four_not_top_two"] = tok.mint in column_window(members, ts)
+        if u.kind != "all" and self.holder_checks:
+            row = self.lookups.get(tok.mint)
+            if row is None:
+                if passes(checks) and tok.mint not in self.requested:
+                    self.requested.add(tok.mint)
+                    self.stats["lookups_requested"] += 1
+                    if self.request_lookup is not None:
+                        self.request_lookup(tok.mint, tok.top_holders(TOP_N), tok.uri, ts)
+                checks["lookup_done"] = False
+            elif row["error"] is None:
+                checks.update(classify(json.loads(row["result"]), row["received_ms"]))
         ok = passes(checks)
         key = (tok.mint, u.name)
         if self.gates.get(key) != ok:
@@ -507,6 +538,8 @@ class Engine:
         for vi in self.slot_index.pop(mint, set()):
             self.slots.pop((vi, mint), None)
         self.active.pop(mint, None)
+        self.lookups.pop(mint, None)
+        self.requested.discard(mint)
         for u in self.universes:
             self.gates.pop((mint, u.name), None)
         for members in self.columns.values():
@@ -562,8 +595,8 @@ def recorded_events(root: Path = LIVE) -> Iterator[tuple[str, dict | int]]:
     connection began.
     """
     frames = []
-    for kind in ("create", "trade"):
-        df = read_table(root, kind)
+    for kind, table in (("create", "create"), ("trade", "trade"), ("lookup", "lookups")):
+        df = read_table(root, table)
         if df is not None:
             frames.append(df.with_columns(_kind=pl.lit(kind)))
     if not frames:
@@ -587,10 +620,15 @@ def recorded_events(root: Path = LIVE) -> Iterator[tuple[str, dict | int]]:
 
 
 def run_replay(engine: Engine, root: Path = LIVE) -> None:
+    # Lookup checks apply only if the recording has the answers.
+    engine.holder_checks = read_table(root, "lookups") is not None
     for kind, item in recorded_events(root):
         if kind == "gap":
             assert isinstance(item, int)
             engine.on_gap(item)
+        elif kind == "lookup":
+            assert isinstance(item, dict)
+            engine.on_lookup(item)
         elif kind == "create":
             assert isinstance(item, dict)
             engine.on_create(item)
@@ -604,12 +642,28 @@ def run_live(engine: Engine, minutes: float | None, events_dir: Path) -> None:
     url = os.environ.get("CRYPTOBOT_WS_URL") or PUBLIC_WS
     source = "CRYPTOBOT_WS_URL" if url != PUBLIC_WS else PUBLIC_WS
     print("paper trading live from", source, flush=True)
+    rpc_url = os.environ.get("CRYPTOBOT_RPC_URL") or PUBLIC_RPC
+    sink = Sink(events_dir, EVENT_SCHEMAS)
+    worker = LookupWorker(
+        engine.on_lookup, lambda row: sink.add("lookups", [row]), next_seq, now_ms, rpc_url
+    )
+    engine.holder_checks = True
+    engine.request_lookup = worker.request
+
+    async def stream() -> None:
+        task = asyncio.create_task(worker.run())
+        try:
+            await record(minutes, url, sink, engine.on_rows, engine.on_gap)
+        finally:
+            task.cancel()
+
     try:
-        asyncio.run(record(minutes, url, Sink(events_dir), engine.on_rows, engine.on_gap))
+        asyncio.run(stream())
     except KeyboardInterrupt:
         print("stopped", flush=True)
     finally:
         engine.finish()
+        sink.flush()
 
 
 def main(argv: list[str] | None = None) -> None:

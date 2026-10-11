@@ -5,9 +5,10 @@ says tokens launch at "$4-5K" and the curve fixes launch at 27.96 SOL, so the mi
 $4.5K, stands for the video's SOL price. Final Stretch is Terminal's "Soon" column; its
 entry threshold isn't stated, so each curve-progress cut-off is its own universe.
 
-Rules that need data we don't have live (X link type, top-5 holders' SOL balances and
-funding, tracked wallets) are recorded as None, never as passed, and the baseline runs
-without them. Results are "V1 minus those checks", and reports say so.
+V1's X-link and top-5 holder checks need network lookups (holders.py); the paper engine
+runs them live once per candidate and records the answers. Tracked wallets need a
+curated wallet list we don't have, so that check is recorded as None (not evaluated),
+never as passed, and reports say so.
 """
 
 from __future__ import annotations
@@ -48,12 +49,9 @@ DELAYS_MS = (1_000, 2_000, 5_000)
 STALL_MS = 10 * 60 * 1000
 CORE = (0.40, 0.45, 0.0)  # V1's own method: 40% dip, +45% bounce, exit at entry
 
-NOT_EVALUATED = (
-    "x_link_is_community",
-    "top5_sol_balances_differ",
-    "top5_funding_not_clustered",
-    "few_tracked_wallets",
-)
+# Filled in by the paper engine from a live lookup (holders.py); None until then.
+LOOKUP_CHECKS = ("x_link_is_community", "top5_sol_balances_differ", "top5_funding_not_clustered")
+NOT_EVALUATED = ("few_tracked_wallets",)
 
 
 @dataclass(frozen=True)
@@ -97,7 +95,7 @@ def check(u: Universe, tok: TokenState, now_ms: int) -> dict[str, bool | None]:
         checks["dev_le_5pct"] = tok.dev_share <= DEV_MAX_SHARE
         checks["insiders_le_20pct"] = tok.insider_share <= INSIDERS_MAX_SHARE
         checks["pro_traders_ge_10"] = tok.pro_traders >= PRO_TRADERS_MIN
-    checks.update(dict.fromkeys(NOT_EVALUATED))
+    checks.update(dict.fromkeys(LOOKUP_CHECKS + NOT_EVALUATED))
     return checks
 
 

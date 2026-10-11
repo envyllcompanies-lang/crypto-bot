@@ -48,6 +48,7 @@ class TokenState:
     n_sells: int = 0
     launch_run_mult: float = 1.0  # highest multiple reached before the first sell
     tainted: str | None = None  # "missed_trade" or "gap": state may be wrong from here on
+    uri: str = ""  # metadata link the creator set; text written by the creator, untrusted
 
     @classmethod
     def from_create(cls, row: dict) -> TokenState:
@@ -60,6 +61,7 @@ class TokenState:
             curve=curve,
             peak_price=curve.price(),
             last_ts_ms=row["received_ms"],
+            uri=row.get("uri") or "",
         )
 
     def apply_trade(self, row: dict) -> None:
@@ -112,6 +114,11 @@ class TokenState:
     @property
     def bundle_candle(self) -> bool:
         return self.launch_run_mult >= BUNDLE_CANDLE_MULT
+
+    def top_holders(self, n: int) -> list[str]:
+        """The n wallets holding the most tokens, largest first."""
+        held = [w for w, b in self.balances.items() if b > 0]
+        return sorted(held, key=lambda w: (-self.balances[w], w))[:n]
 
     def largest_holder(self) -> tuple[str | None, float]:
         """Wallet holding the most tokens (the curve itself is not a wallet here)."""
