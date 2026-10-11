@@ -30,8 +30,9 @@ Beyond replay.py:
 - Tokens are tracked only from their create event, so Final Stretch entries wait until
   the run is 40 minutes old: before then the column's market-cap ranking is incomplete.
 - V1's X-link and top-5 holder checks are looked up live (holders.py) once a token
-  passes every other rule, and entries wait for the answer. The answers are saved with
-  the run's events, so a replay sees exactly what the live run saw.
+  passes every other rule, and entries wait for the answer. The same lookup asks a free
+  LLM to rate the token's narrative when a key is set (narrative.py). The answers are
+  saved with the run's events, so a replay sees exactly what the live run saw.
 - Results carry flags: "gap" when the stream dropped while the order or position was
   open, and "missed_trade" when the token's reserves skipped a trade. Tainted tokens
   get no new entries.
@@ -57,6 +58,7 @@ from cryptobot.costs import Venue
 from cryptobot.curve import Curve, to_lamports, to_sol
 from cryptobot.features import TokenState, is_classic
 from cryptobot.holders import LOOKUP_SCHEMA, PUBLIC_RPC, TOP_N, LookupWorker, classify
+from cryptobot.narrative import make_judge
 from cryptobot.recorder import LIVE, PUBLIC_WS, SCHEMAS, Sink, next_seq, now_ms, record
 from cryptobot.replay import Buy, Position, Sell, TradeResult, View
 from cryptobot.v1 import (
@@ -177,7 +179,8 @@ class Engine:
         # Lookups for V1's X-link and holder checks. Live mode sets request_lookup;
         # replay feeds recorded answers through on_lookup.
         self.holder_checks = False
-        self.request_lookup: Callable[[str, list[str], str, int], None] | None = None
+        # Called with (mint, top holders, metadata uri, ts, name, symbol).
+        self.request_lookup: Callable[[str, list[str], str, int, str, str], None] | None = None
         self.lookups: dict[str, dict] = {}
         self.requested: set[str] = set()
         # Rewritten on every flush, so a report can read a run that is still going.
@@ -308,7 +311,9 @@ class Engine:
                     self.requested.add(tok.mint)
                     self.stats["lookups_requested"] += 1
                     if self.request_lookup is not None:
-                        self.request_lookup(tok.mint, tok.top_holders(TOP_N), tok.uri, ts)
+                        self.request_lookup(
+                            tok.mint, tok.top_holders(TOP_N), tok.uri, ts, tok.name, tok.symbol
+                        )
                 checks["lookup_done"] = False
             elif row["error"] is None:
                 checks.update(classify(json.loads(row["result"]), row["received_ms"]))
@@ -644,8 +649,14 @@ def run_live(engine: Engine, minutes: float | None, events_dir: Path) -> None:
     print("paper trading live from", source, flush=True)
     rpc_url = os.environ.get("CRYPTOBOT_RPC_URL") or PUBLIC_RPC
     sink = Sink(events_dir, EVENT_SCHEMAS)
+    judge = make_judge()
+    print(
+        "narrative judge:",
+        ", ".join(judge.names) if judge else "none (no GROQ_API_KEY or GEMINI_API_KEY)",
+        flush=True,
+    )
     worker = LookupWorker(
-        engine.on_lookup, lambda row: sink.add("lookups", [row]), next_seq, now_ms, rpc_url
+        engine.on_lookup, lambda row: sink.add("lookups", [row]), next_seq, now_ms, rpc_url, judge
     )
     engine.holder_checks = True
     engine.request_lookup = worker.request

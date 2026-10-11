@@ -49,6 +49,9 @@ class TokenState:
     launch_run_mult: float = 1.0  # highest multiple reached before the first sell
     tainted: str | None = None  # "missed_trade" or "gap": state may be wrong from here on
     uri: str = ""  # metadata link the creator set; text written by the creator, untrusted
+    name: str = ""  # creator-written, untrusted: shown in reports and judged, never acted on
+    symbol: str = ""
+    copycat: bool = False  # name or symbol reused from a launch in the previous 24 hours
 
     @classmethod
     def from_create(cls, row: dict) -> TokenState:
@@ -62,6 +65,8 @@ class TokenState:
             peak_price=curve.price(),
             last_ts_ms=row["received_ms"],
             uri=row.get("uri") or "",
+            name=row.get("name") or "",
+            symbol=row.get("symbol") or "",
         )
 
     def apply_trade(self, row: dict) -> None:

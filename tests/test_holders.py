@@ -109,7 +109,9 @@ def new_pairs_engine():
     eng = Engine([var])
     eng.holder_checks = True
     asks = []
-    eng.request_lookup = lambda mint, wallets, uri, ts: asks.append((mint, wallets, ts))
+    eng.request_lookup = lambda mint, wallets, uri, ts, name, symbol: asks.append(
+        (mint, wallets, ts)
+    )
     return eng, asks
 
 

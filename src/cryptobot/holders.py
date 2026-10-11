@@ -21,7 +21,10 @@ Definitions (our proposals; V1 gives examples, not thresholds):
 - X link: x.com/i/communities/... is a community; .../status/... a tweet; anything else
   on x.com or twitter.com a profile. No X link fails the check.
 
-Metadata is text written by token creators: it is parsed for links only, never acted on.
+Metadata is text written by token creators: it is parsed for links and a truncated
+description, never acted on. When a narrative judge is configured (narrative.py, free
+LLM tiers), the same lookup also asks it to rate the token's story; its answer, or the
+reason it gave none, is saved in the result as "narrative" or "narrative_error".
 """
 
 from __future__ import annotations
@@ -48,6 +51,7 @@ SIGNATURE_PAGE = 1000  # a wallet with this many signatures or more is not fresh
 MIN_INTERVAL_S = 0.25  # at most 4 requests a second, well inside the public RPC's limits
 MAX_QUEUE = 20  # beyond this, a lookup is skipped and recorded as "busy"
 METADATA_MAX_BYTES = 65_536
+DESCRIPTION_MAX_CHARS = 300
 X_HOSTS = ("x.com", "twitter.com")
 
 LOOKUP_SCHEMA = {
@@ -56,12 +60,13 @@ LOOKUP_SCHEMA = {
     "event_index": pl.UInt16,
     "mint": pl.Utf8,
     "requested_ms": pl.Int64,
-    "result": pl.Utf8,  # JSON: wallets, balances, first_ms, funders, x_link, x_kind, ...
+    "result": pl.Utf8,  # JSON: wallets, balances, first_ms, funders, x_link, x_kind, narrative...
     "error": pl.Utf8,
 }
 
 Call = Callable[[str, list], object]
 Fetch = Callable[[str], dict | None]
+Judge = Callable[[dict], dict | None]
 
 
 def rpc(method: str, params: list, url: str = PUBLIC_RPC, retries: int = 4) -> object:
@@ -145,12 +150,21 @@ def funder_of(tx: dict | None, wallet: str) -> str | None:
     return key if drop > 0 else None
 
 
-def _short(value: object) -> str | None:
-    return value[:200] if isinstance(value, str) else None
+def _short(value: object, limit: int = 200) -> str | None:
+    return value[:limit] if isinstance(value, str) else None
 
 
-def lookup(wallets: list[str], uri: str, call: Call, fetch: Fetch = fetch_metadata) -> dict:
-    """Balances, first-transaction times and funders of the wallets, and the X link."""
+def lookup(
+    wallets: list[str],
+    uri: str,
+    call: Call,
+    fetch: Fetch = fetch_metadata,
+    name: str = "",
+    symbol: str = "",
+    judge: Judge | None = None,
+) -> dict:
+    """Balances, first-transaction times and funders of the wallets, the X link, and
+    the narrative judge's verdict when one is configured."""
     balances: list[int] = []
     first_ms: list[int | None] = []
     funders: list[str | None] = []
@@ -179,9 +193,19 @@ def lookup(wallets: list[str], uri: str, call: Call, fetch: Fetch = fetch_metada
             "x_kind": x_link_kind(x_link) or "none",
             "telegram": _short(meta.get("telegram")),
             "website": _short(meta.get("website")),
+            "description": _short(meta.get("description"), DESCRIPTION_MAX_CHARS),
         }
     except Exception as exc:  # metadata unreachable: the X check is then not evaluated
         out |= {"x_kind": None, "metadata_error": type(exc).__name__}
+    if judge is not None:
+        token = {"name": name, "symbol": symbol, **out}
+        try:
+            verdict = judge(token)
+        except Exception as exc:  # recorded; the narrative is then not evaluated
+            out["narrative_error"] = str(exc)[:200] or type(exc).__name__
+        else:
+            if verdict is not None:
+                out["narrative"] = verdict
     return out
 
 
@@ -225,24 +249,30 @@ class LookupWorker:
         next_seq: Callable[[], int],
         now_ms: Callable[[], int],
         url: str = PUBLIC_RPC,
+        judge: Judge | None = None,
     ) -> None:
-        self.queue: asyncio.Queue[tuple[str, list[str], str, int]] = asyncio.Queue()
+        self.queue: asyncio.Queue[tuple] = asyncio.Queue()
         self.on_result, self.add_row = on_result, add_row
         self.next_seq, self.now_ms = next_seq, now_ms
         self.call = throttled(url)
+        self.judge = judge
 
-    def request(self, mint: str, wallets: list[str], uri: str, ts: int) -> None:
+    def request(
+        self, mint: str, wallets: list[str], uri: str, ts: int, name: str, symbol: str
+    ) -> None:
         if self.queue.qsize() >= MAX_QUEUE:
             self._deliver(mint, ts, None, "busy")
         else:
-            self.queue.put_nowait((mint, wallets, uri, ts))
+            self.queue.put_nowait((mint, wallets, uri, ts, name, symbol))
 
     async def run(self) -> None:
         while True:
-            mint, wallets, uri, ts = await self.queue.get()
+            mint, wallets, uri, ts, name, symbol = await self.queue.get()
             result, error = None, None
             try:
-                result = await asyncio.to_thread(lookup, wallets, uri, self.call)
+                result = await asyncio.to_thread(
+                    lookup, wallets, uri, self.call, fetch_metadata, name, symbol, self.judge
+                )
             except Exception as exc:  # recorded; the holder checks are then not evaluated
                 error = type(exc).__name__
             self._deliver(mint, ts, result, error)
