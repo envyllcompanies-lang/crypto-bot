@@ -16,8 +16,12 @@ from cryptobot.v1 import ALL, Variant
 MINT = "Mint1111"
 
 
-def create_row(mint=MINT, ts=0, slot=100, creator="dev", mayhem=False, seq=0):
+def create_row(
+    mint=MINT, ts=0, slot=100, creator="dev", mayhem=False, seq=0, name=None, symbol=None
+):
     return {
+        "name": name,
+        "symbol": symbol,
         "seq": seq,
         "mint": mint,
         "creator": creator,

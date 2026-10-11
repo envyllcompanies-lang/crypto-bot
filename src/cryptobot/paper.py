@@ -56,7 +56,7 @@ import polars as pl
 
 from cryptobot.costs import Venue
 from cryptobot.curve import Curve, to_lamports, to_sol
-from cryptobot.features import TokenState, is_classic
+from cryptobot.features import CopycatWindow, TokenState, is_classic
 from cryptobot.holders import LOOKUP_SCHEMA, PUBLIC_RPC, TOP_N, LookupWorker, classify
 from cryptobot.narrative import make_judge
 from cryptobot.recorder import LIVE, PUBLIC_WS, SCHEMAS, Sink, next_seq, now_ms, record
@@ -161,6 +161,7 @@ class Engine:
         by_name = {v.universe.name: v.universe for v in self.variants}
         self.universes: list[Universe] = list(by_name.values())
         self.tokens: dict[str, TokenState] = {}
+        self.copycats = CopycatWindow()
         self.slots: dict[tuple[int, str], _Slot] = {}
         self.slot_index: dict[str, set[int]] = defaultdict(set)
         # Slots with an order in flight, a position, or their own curve.
@@ -201,9 +202,12 @@ class Engine:
     def on_create(self, row: dict) -> None:
         self._advance(row["received_ms"])
         self.stats["creates"] += 1
+        copycat = self.copycats.seen(row.get("name"), row.get("symbol"), row["received_ms"])
         if is_classic(row):
-            self.tokens[row["mint"]] = TokenState.from_create(row)
+            tok = self.tokens[row["mint"]] = TokenState.from_create(row)
+            tok.copycat = copycat
             self.stats["classic_creates"] += 1
+            self.stats["copycats"] += copycat
 
     def on_trade(self, row: dict) -> None:
         ts = row["received_ms"]

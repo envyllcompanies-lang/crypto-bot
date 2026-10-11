@@ -11,6 +11,7 @@ evaluated.
 
 from __future__ import annotations
 
+from collections import Counter, deque
 from dataclasses import dataclass, field
 
 from cryptobot.curve import INITIAL_VIRTUAL_SOL, TOTAL_SUPPLY, Curve, launch_multiple, to_lamports
@@ -24,11 +25,53 @@ BUNDLE_CANDLE_MULT = 2.0
 # Wallets whose first buy lands in the create slot or the next one count as insiders
 # (with the creator), the definition loopholetape/pumpfun-launches uses for bundles.
 INSIDER_SLOTS = 1
+# Copycats: a launch reusing a name or symbol seen in this window. Originals graduate
+# about ten times as often as copycats (research report); the window is our choice.
+COPYCAT_WINDOW_MS = 24 * 60 * 60 * 1000
+COPYCAT_MAX_KEYS = 400_000  # memory bound: about 2 days of launches at today's rate
 
 
 def is_classic(create: dict) -> bool:
     """SOL-quoted (30 SOL virtual at create) and not in Mayhem mode."""
     return create["virtual_sol_reserves"] == INITIAL_VIRTUAL_SOL and not create["is_mayhem_mode"]
+
+
+class CopycatWindow:
+    """Names and symbols of launches in the last 24 hours, by arrival time.
+
+    Every launch counts, Mayhem and non-SOL ones included, since a copycat can copy any
+    of them. A run starts with an empty window, so its first day finds fewer copycats.
+    """
+
+    def __init__(self, window_ms: int = COPYCAT_WINDOW_MS, max_keys: int = COPYCAT_MAX_KEYS):
+        self.window_ms, self.max_keys = window_ms, max_keys
+        self.order: deque[tuple[int, str]] = deque()
+        self.counts: Counter[str] = Counter()
+
+    @staticmethod
+    def keys(name: str | None, symbol: str | None) -> list[str]:
+        out = []
+        for prefix, value in (("n:", name), ("s:", symbol)):
+            value = (value or "").strip().lower()
+            if value:
+                out.append(prefix + value)
+        return out
+
+    def seen(self, name: str | None, symbol: str | None, ts_ms: int) -> bool:
+        """True if this name or symbol was used in the window; then remember both."""
+        while self.order and (
+            self.order[0][0] < ts_ms - self.window_ms or len(self.order) > self.max_keys
+        ):
+            _, old = self.order.popleft()
+            self.counts[old] -= 1
+            if not self.counts[old]:
+                del self.counts[old]
+        keys = self.keys(name, symbol)
+        copied = any(k in self.counts for k in keys)
+        for k in keys:
+            self.order.append((ts_ms, k))
+            self.counts[k] += 1
+        return copied
 
 
 @dataclass
@@ -148,4 +191,5 @@ class TokenState:
             "trades": self.n_trades,
             "sells": self.n_sells,
             "tainted": self.tainted,
+            "copycat": self.copycat,
         }

@@ -108,3 +108,29 @@ def test_wilson_interval():
     lo, hi = wilson(5, 10)
     assert lo == pytest.approx(0.2366, abs=1e-3) and hi == pytest.approx(0.7634, abs=1e-3)
     assert wilson(0, 0) == (0.0, 1.0)
+
+
+def test_copycat_window():
+    from cryptobot.features import COPYCAT_WINDOW_MS, CopycatWindow
+
+    w = CopycatWindow()
+    assert not w.seen("Moon Cat", "MCAT", 0)
+    assert w.seen("  moon cat ", "OTHER", 1_000)  # same name, case and spaces aside
+    assert w.seen("Different", "mcat", 2_000)  # same symbol
+    assert not w.seen("", "", 3_000) and not w.seen(None, None, 3_500)  # blanks never match
+    assert not w.seen("Moon Cat", "MCAT", 2_000 + COPYCAT_WINDOW_MS + 1)  # all aged out
+    small = CopycatWindow(max_keys=2)
+    small.seen("a", "A", 0)
+    small.seen("b", "B", 1)
+    assert not small.seen("a", "Z", 2)  # memory bound pushed the oldest out
+
+
+def test_engine_marks_copycats_on_create():
+    from cryptobot.paper import Engine
+    from cryptobot.v1 import ALL
+
+    eng = Engine([variant(ALL, 0.4, 0.45, 0.0)])
+    eng.on_create(create_row(mint="m1", name="Pepe", symbol="PEPE"))
+    eng.on_create(create_row(mint="m2", ts=5, name="Frog", symbol="pepe"))
+    assert not eng.tokens["m1"].copycat and eng.tokens["m2"].copycat
+    assert eng.stats["copycats"] == 1
