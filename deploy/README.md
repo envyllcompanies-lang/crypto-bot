@@ -1,36 +1,27 @@
 # Run the paper trader 24/7, free
 
-The paper trader runs on an Oracle Cloud "Always Free" server in Ashburn, Virginia. Ashburn is close to much of Solana's infrastructure, and the free Ampere machine has dedicated CPU. It is paper trading only: no wallet, no keys, no money.
+The paper trader runs on Google Cloud's free-tier **e2-micro** server in us-east1 (South Carolina). The free tier covers one e2-micro per month, permanently, in us-east1, us-central1 or us-west1. A 1-minute live test used about 2.4% of one CPU core and 69 MB of memory, well inside the e2-micro. It is paper trading only: no wallet, no keys, no money.
 
-## 1. Create an Oracle Cloud account
+## 1. Create a Google Cloud account
 
-1. Sign up at https://www.oracle.com/cloud/free/.
-2. **Home region: US East (Ashburn).** You can't change it later, and Always Free machines run only in your home region.
-3. Oracle asks for a card to check your identity. Always Free resources aren't charged. Don't upgrade the account unless you decide to.
+1. Go to https://console.cloud.google.com/ and sign in with a Google account. Accept the free trial; Google asks for a card to check your identity.
+2. **Set a $1 budget alert** at https://console.cloud.google.com/billing/budgets, so Google emails you if anything ever starts costing money.
 
 ## 2. Create the server
 
-In https://cloud.oracle.com go to Menu → Compute → Instances → **Create instance** and set:
+Go to https://console.cloud.google.com/compute/instances. Click "Enable" if asked, then **Create instance**, and set:
 
 - **Name:** `crypto-bot`.
-- **Image:** Canonical Ubuntu 24.04.
-- **Shape:** Change shape → Ampere → `VM.Standard.A1.Flex`, **1 OCPU, 6 GB** memory.
-- **Networking:** keep the defaults, which give a public IPv4 address.
-- **SSH keys:** "Generate a key pair for me" → **Save private key**. You need this file to log in.
+- **Region:** `us-east1` (South Carolina), zone `us-east1-b`.
+- **Machine type:** E2 → `e2-micro`.
+- **Boot disk:** Change → **Ubuntu 24.04 LTS** (x86/64), disk type **Standard persistent disk**, size **30 GB**. The default "Balanced" disk is not free.
+- **Firewall:** leave both boxes unticked; nothing needs to reach the server.
 
-Click **Create**. If it says "Out of capacity", try again later or pick another availability domain. Then copy the **Public IP address** from the instance page.
+Click **Create**.
 
-## 3. Log in from your Mac
+## 3. Open a terminal on the server
 
-In Terminal, use the key file you downloaded and the Public IP address from step 2:
-
-```bash
-chmod 600 ~/Downloads/ssh-key-YYYY-MM-DD.key
-```
-
-```bash
-ssh -i ~/Downloads/ssh-key-YYYY-MM-DD.key ubuntu@PUBLIC_IP
-```
+In the instance list, click **SSH** next to `crypto-bot`. A terminal opens in your browser; no key files are needed.
 
 ## 4. Install and start (on the server)
 
@@ -73,7 +64,7 @@ To read the daily report on GitHub (on the `paper-results` branch) instead of lo
 
 ## Things to know
 
+- **Cost check:** the free tier covers the machine, a 30 GB standard disk and 1 GB a month of outbound traffic. The trader mostly downloads, and incoming traffic is free. Google's pricing for the server's public IPv4 address has changed over time, so look at the billing page after a day; the budget alert will also email you.
 - **Disk:** raw events take roughly 0.8 GB a day, and 14 days are kept. Change that with `CRYPTOBOT_KEEP_DAYS=N` in `~/crypto-bot/.env`. Trades, decisions and reports are kept.
 - **Restarts:** each restart starts a new run, and Final Stretch waits 40 minutes again.
-- **Idle reclamation:** Oracle's docs say it may reclaim Always Free machines that look idle over 7 days, meaning CPU, network and memory all under 20%. A 1-OCPU machine keeps the trader's share of the CPU higher. If Oracle emails an idle warning, tell Claude.
 - **Faster feed:** to use a faster data feed later, put `CRYPTOBOT_WS_URL=...` in `~/crypto-bot/.env` yourself and run `sudo systemctl restart crypto-bot`. The URL is never printed.

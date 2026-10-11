@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Set up the 24/7 paper trader on an Ubuntu server (written for Oracle Cloud Always Free,
-# Ampere A1). Run it again any time to update the code and restart. See deploy/README.md.
+# Set up the 24/7 paper trader on an Ubuntu server (written for the Google Cloud
+# free-tier e2-micro). Run it again any time to update the code and restart. See deploy/README.md.
 #
 # Paper trading only: nothing here builds, signs or sends a transaction, and no key is
 # needed. The only credential involved is the GitHub deploy key you created to clone.

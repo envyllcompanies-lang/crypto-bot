@@ -18,7 +18,7 @@ Full research report (verdicts, sources, math): https://claude.ai/code/artifact/
 ## Stack and conventions
 
 - Python 3.12, uv for environments, pytest for tests, ruff for lint.
-- The paper trader runs 24/7 on an Oracle Cloud Always Free server (US East, Ashburn); setup in `deploy/README.md`.
+- The paper trader runs 24/7 on a Google Cloud free-tier e2-micro server (us-east1); setup in `deploy/README.md`.
 - Data as Parquet, queried with Polars or DuckDB. Each dataset gets a short entry in `data/README.md` (source, date range, licence, how it was fetched).
 - Layout: `src/cryptobot/` (library), `tests/`, `notebooks/` (exploration only), `reports/` (dated markdown results), `docs/` (spec and research).
 - Keep amounts in lamports and raw token units inside the code. Convert to SOL or USD only at the edges.
