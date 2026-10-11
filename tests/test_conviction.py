@@ -29,34 +29,59 @@ def with_narrative(score, flags=()):
     return {**CLEAN, "narrative": {"score": score, "theme": "t", "red_flags": list(flags)}}
 
 
+BASE = 71  # clean_token with CLEAN: see test_base_score_parts
+
+
+def test_base_score_parts():
+    c = conviction(clean_token(), CLEAN, 4_000, NOW)
+    assert (c.score, c.tier, c.drop) == (BASE, "good", 0.25)
+    assert c.reasons["not_copycat"] == 20 and c.reasons["creator_record"] == 0
+    assert c.reasons["x_link"] == 4 and c.reasons["climb"] == 8
+    assert sum(c.reasons.values()) == pytest.approx(70.62, abs=0.01)
+
+
 @pytest.mark.parametrize(
-    ("result", "score", "tier", "drop"),
+    ("graduates", "recent", "copycat", "score", "tier"),
     [
-        (with_narrative(5), 40 + 12 + 8 + 8 + 8 + 8 + 4 + 8 * 0.2, "very_high", 0.0),
-        (with_narrative(4), 30 + 49.6, "very_high", 0.0),  # 79.6 rounds to 80
-        (with_narrative(3), 20 + 49.6, "good", 0.25),
-        (with_narrative(2), 10 + 49.6, "average", 0.40),
-        (with_narrative(1), 49.6, "average", 0.40),
-        (with_narrative(1, ["no_story"]), 39.6, "skip", None),
-        (with_narrative(5, ["low_effort", "no_story"]), 89.6 - 20, "good", 0.25),
-        (CLEAN, 15 + 49.6, "good", 0.25),  # narrative not evaluated: neutral 15
-        ({**CLEAN, "x_kind": None}, 15 + 49.6 - 12 + 4, "average", 0.40),
+        (1, False, False, BASE + 15, "very_high"),  # earlier graduate: +15
+        (0, True, False, BASE - 10, "average"),  # serial launcher: -10
+        (2, True, False, BASE + 5, "good"),
+        (None, None, True, BASE - 30, "skip"),  # copycat: no 20 points and a -10 flag
     ],
 )
-def test_tiers(result, score, tier, drop):
+def test_creator_record_and_copycat_move_the_tier(graduates, recent, copycat, score, tier):
     tok = clean_token()
-    assert tok.pro_traders == 2  # "a" and "b" bought 0.5 SOL or more
-    c = conviction(tok, result, 4_000, NOW)
-    assert c is not None
-    assert (c.score, c.tier, c.drop) == (round(score), tier, drop)
-    assert sum(c.reasons.values()) == pytest.approx(score, abs=0.01)
+    tok.creator_graduates, tok.creator_recent_launch, tok.copycat = graduates, recent, copycat
+    c = conviction(tok, CLEAN, 4_000, NOW)
+    assert (c.score, c.tier) == (score, tier)
+
+
+def test_narrative_is_logged_but_never_scored():
+    tok = clean_token()
+    plain = conviction(tok, CLEAN, 4_000, NOW)
+    for score, flags in ((5, []), (1, ["no_story", "scam_signs"])):
+        c = conviction(tok, with_narrative(score, flags), 4_000, NOW)
+        assert (c.score, c.reasons) == (plain.score, plain.reasons)
+        assert c.shadow == {
+            "narrative_score": score,
+            "narrative_theme": "t",
+            "narrative_red_flags": flags,
+        }
+    assert plain.shadow["narrative_score"] is None
+
+
+def test_early_buyers_holding_much_of_the_supply_lose_points():
+    tok = clean_token()
+    whale = tok.early_buyers[0]
+    tok.balances[whale] = int(0.40 * 10**15)  # 40% of supply
+    assert conviction(tok, CLEAN, 4_000, NOW).reasons["early_buyers"] == 0
 
 
 def test_copycat_loses_points_and_counts_as_a_red_flag():
     tok = clean_token()
     tok.copycat = True
     c = conviction(tok, with_narrative(5, ["copycat"]), 4_000, NOW)
-    assert c.red_flags == ("copycat",)  # not counted twice
+    assert c.red_flags == ("copycat",)
     assert c.reasons["not_copycat"] == 0 and c.reasons["red_flags"] == -10
 
 
@@ -65,6 +90,7 @@ def test_dev_and_insider_points_scale_down():
     tok.balances["dev"] = int(0.10 * 10**15)  # 10% of supply (6 decimals)
     c = conviction(tok, CLEAN, 4_000, NOW)
     assert c.reasons["dev_share"] == pytest.approx(4.0)  # halfway from 5% to 15%
+    # the insider share counts the dev: 10% is still under the 20% line
     assert c.reasons["insider_share"] == 8.0  # 10% is under the 20% line
 
 
@@ -131,18 +157,72 @@ def buy_signals(tmp_path, result):
     return list(zip(buys["ts_ms"].to_list(), buys["reason"].to_list(), strict=True)), eng
 
 
-def test_very_high_conviction_buys_at_once(tmp_path):
-    signals, _ = buy_signals(tmp_path, with_narrative(5))
-    assert signals == [(5_000, "conviction 90 very_high")]
-    gates = read_table(tmp_path, "gates").filter(passed=True)
+def test_good_conviction_buys_the_dip_whatever_the_narrative(tmp_path):
+    # At 5 s one early buyer holds 44% of supply (score 63, average: wait for 40%); at 6 s
+    # it sells half, a 43% drop, and the score is 71 (good, which takes a 25% dip).
+    for score in (5, 1):
+        signals, _ = buy_signals(tmp_path / str(score), with_narrative(score))
+        assert signals == [(6_000, "conviction 71 good")]
+    gates = read_table(tmp_path / "5", "gates").filter(passed=True)
     features = json.loads(gates["features"][0])
-    assert features["conviction"]["tier"] == "very_high"
+    assert features["conviction"]["shadow"]["narrative_score"] == 5
     assert features["narrative"]["score"] == 5 and features["x_kind"] == "community"
 
 
-def test_average_conviction_waits_for_a_40pct_dip(tmp_path):
-    signals, _ = buy_signals(tmp_path, with_narrative(2))
-    assert signals == [(6_000, "conviction 60 average")]
+def creators_row(creator="dev", graduated=1, last_launch_ms=-10 * 24 * 3_600_000):
+    return {
+        "seq": 0,
+        "received_ms": 0,
+        "event_index": 0,
+        "list_mtime_ms": 1,
+        "creators": [creator],
+        "launches": [3],
+        "graduated": [graduated],
+        "last_launch_ms": [last_launch_ms],
+    }
+
+
+@pytest.mark.parametrize(
+    ("row", "signal"),
+    [
+        (creators_row(), (6_000, "conviction 86 very_high")),  # an earlier graduate
+        (creators_row(graduated=0, last_launch_ms=-3_600_000), (6_000, "conviction 61 average")),
+    ],
+)
+def test_creator_record_changes_the_entry(tmp_path, row, signal):
+    eng, _ = conviction_engine(Sink(tmp_path, OUT_SCHEMAS))
+    eng.on_creators(row)
+    feed(eng, dump_tape(), CLEAN)
+    eng.finish()
+    eng.flush()
+    buys = read_table(tmp_path, "decisions").filter(kind="signal_buy")
+    assert list(zip(buys["ts_ms"], buys["reason"], strict=True)) == [signal]
+
+
+def test_creator_stamps():
+    eng, _ = conviction_engine()
+    eng.on_create(create_row(mint="m1", creator="x", ts=1_000))
+    assert eng.tokens["m1"].creator_graduates is None  # no creator file yet
+    assert eng.tokens["m1"].creator_recent_launch is None
+    eng.on_create(create_row(mint="m2", creator="x", ts=2_000))
+    assert eng.tokens["m2"].creator_recent_launch is True  # seen launching 1 s earlier
+    eng.on_creators(creators_row(creator="y", graduated=2) | {"received_ms": 3_000})
+    eng.on_create(create_row(mint="m3", creator="y", ts=4_000))
+    eng.on_create(create_row(mint="m4", creator="z", ts=5_000))
+    assert (eng.tokens["m3"].creator_graduates, eng.tokens["m3"].creator_recent_launch) == (
+        2,
+        False,
+    )
+    assert eng.tokens["m4"].creator_graduates == 0  # file loaded, creator not in it
+
+
+def test_launches_older_than_the_recent_window_are_forgotten():
+    from cryptobot.creators import RECENT_LAUNCH_MS
+
+    eng, _ = conviction_engine()
+    eng.on_create(create_row(mint="m1", creator="old", ts=1_000))
+    eng.on_create(create_row(mint="m2", creator="new", ts=RECENT_LAUNCH_MS + 2_000))
+    assert set(eng.creator_launches) == {"new"}
 
 
 def test_hard_block_never_buys(tmp_path):
@@ -170,9 +250,9 @@ def test_mark_to_market():
     assert set(flat["open_value_lamports"].values()) == {0}
 
     eng, _ = conviction_engine()
-    feed(eng, dump_tape(), with_narrative(5), stop_ms=5_000)
-    # Any later event lands the buy decided at 5 s; a lookup for another token will do.
-    eng.on_lookup(lookup_row(None, 5_600, error="busy") | {"mint": "other"})
+    feed(eng, dump_tape(), with_narrative(5), stop_ms=6_000)
+    # Any later event lands the buy decided at 6 s; a lookup for another token will do.
+    eng.on_lookup(lookup_row(None, 6_600, error="busy") | {"mint": "other"})
     (slot,) = [s for s in eng.slots.values() if s.position is not None]
     curve, balance = slot.curve, list(eng.balance)
     s1, s2 = eng.summary(), eng.summary()
@@ -199,7 +279,7 @@ def test_replay_with_recorded_narrative_matches_live(tmp_path):
     run_replay(replayed, tmp_path)
     assert [r for _, _, r in replayed.results] == [r for _, _, r in live.results]
     ((_, _, trade),) = live.results
-    assert trade.entry_reason == "conviction 90 very_high"
+    assert trade.entry_reason == "conviction 71 good"
     assert replayed.summary()["equity_lamports"] == live.summary()["equity_lamports"]
 
 
@@ -231,12 +311,12 @@ def test_report_shows_v1_as_stated_tiers_and_spot_checks(tmp_path):
     # Shown even with no trades: Final Stretch takes none in a run's first 40 minutes.
     assert "| final_stretch_50 | dip40\\|tp45\\|sl0\\|d2s | 0 | n/a" in text
     assert "| conviction | tp45\\|sl0\\|d2s | 1 |" in text
-    assert "| very_high | 1 |" in text and "| good | 0 | n/a | n/a |" in text
+    assert "| good | 1 |" in text and "| very_high | 0 | n/a | n/a |" in text
     spot = text[text.index("## Spot-check list") :]
     row = next(line for line in spot.splitlines() if "`Mint1111`" in line)
     assert "| `Evil \\| [click](https://x.example) **coin` (`EVL\\|`) |" in row
     assert "community `https://x.com/i/communities/9`" in row
-    assert "| 90 very_high | 5/5 `t` |" in row
+    assert "| 71 good | 5/5 `t` |" in row
     assert "| final_stretch_50 | n/a | n/a | n/a | n/a |" in text  # no network-cost data
     summary = json.loads((run / "summary.json").read_text())
     assert summary["equity_lamports"] == summary["final_balance_lamports"]  # all closed

@@ -20,6 +20,14 @@ if ! nice -n 10 "$PYTHON" -m cryptobot.tracked --days "${CRYPTOBOT_TRACKED_DAYS:
   rm -f "$TRACKED_REPORT"
 fi
 
+# Rebuild creator records (launches and graduates per creator) the same way.
+CREATORS_REPORT="data/reports/$DAY-creators.md"
+if ! nice -n 10 "$PYTHON" -m cryptobot.creators --days "${CRYPTOBOT_CREATOR_DAYS:-14}" \
+    > "$CREATORS_REPORT"; then
+  echo "creator records: build failed, keeping the previous records" >&2
+  rm -f "$CREATORS_REPORT"
+fi
+
 REPORT="data/reports/$DAY-paper.md"
 "$PYTHON" -m cryptobot.m6_report > "$REPORT"
 echo "report: $REPORT"
@@ -40,6 +48,7 @@ if [ "${CRYPTOBOT_PUSH_REPORTS:-0}" = "1" ]; then
   mkdir -p "$work/reports"
   cp "$REPORT" "$work/reports/"
   [ -f "$TRACKED_REPORT" ] && cp "$TRACKED_REPORT" "$work/reports/"
+  [ -f "$CREATORS_REPORT" ] && cp "$CREATORS_REPORT" "$work/reports/"
   git -C "$work" add reports
   if git -C "$work" -c user.name="crypto-bot server" \
       -c user.email="crypto-bot-server@users.noreply.github.com" \

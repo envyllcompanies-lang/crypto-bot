@@ -379,3 +379,39 @@ def test_report_renders_a_replayed_run(tmp_path):
     assert "| Status | finished |" in text
     assert "## Feed lag" in text and "| 1.00 s |" in text
     assert "| all | v | 1 | 100.0%" in text
+
+
+def test_lookup_delays_split_holder_lookups_from_narrative_verdicts(tmp_path):
+    import json
+
+    from cryptobot.holders import LOOKUP_SCHEMA
+    from cryptobot.m6_report import lookup_delays, lookup_section
+
+    def row(seq, received, result, error=None):
+        return {
+            "seq": seq,
+            "received_ms": received,
+            "event_index": 0,
+            "mint": "m",
+            "requested_ms": 1_000,
+            "result": None if result is None else json.dumps(result),
+            "error": error,
+        }
+
+    sink = Sink(tmp_path, {"lookups": LOOKUP_SCHEMA})
+    sink.add(
+        "lookups",
+        [
+            row(1, 2_000, {"wallets": []}),
+            row(2, 4_000, None, error="timeout"),
+            row(3, 9_000, {"narrative_update": True, "narrative": {"score": 3}}),
+        ],
+    )
+    sink.flush()
+    table = {r["kind"]: r for r in lookup_delays(tmp_path).iter_rows(named=True)}
+    assert table["holders"]["n"] == 2 and table["holders"]["failed"] == 1
+    assert table["holders"]["worst"] == 3.0
+    assert table["narrative"]["n"] == 1 and table["narrative"]["median"] == 8.0
+    text = "\n".join(lookup_section(tmp_path))
+    assert "| narrative | 1 | 0 | 8.00 s |" in text
+    assert "No lookups" in "\n".join(lookup_section(tmp_path / "missing"))

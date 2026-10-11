@@ -61,6 +61,8 @@ import polars as pl
 
 from cryptobot.conviction import Conviction, blocks, conviction
 from cryptobot.costs import Venue
+from cryptobot.creators import CREATORS_PATH, RECENT_LAUNCH_MS
+from cryptobot.creators import load as load_creators
 from cryptobot.curve import Curve, to_lamports, to_sol
 from cryptobot.features import CopycatWindow, TokenState, is_classic
 from cryptobot.holders import LOOKUP_SCHEMA, PUBLIC_RPC, TOP_N, LookupWorker, classify
@@ -132,7 +134,23 @@ TRACKED_SCHEMA = {
     "list_mtime_ms": pl.Int64,
     "wallets": pl.List(pl.Utf8),
 }
-EVENT_SCHEMAS = {**SCHEMAS, "lookups": LOOKUP_SCHEMA, "tracked": TRACKED_SCHEMA}
+# Each creator-record file the live run loaded (creators.py), as parallel lists.
+CREATORS_SCHEMA = {
+    "seq": pl.UInt64,
+    "received_ms": pl.Int64,
+    "event_index": pl.UInt16,
+    "list_mtime_ms": pl.Int64,
+    "creators": pl.List(pl.Utf8),
+    "launches": pl.List(pl.Int64),
+    "graduated": pl.List(pl.Int64),
+    "last_launch_ms": pl.List(pl.Int64),
+}
+EVENT_SCHEMAS = {
+    **SCHEMAS,
+    "lookups": LOOKUP_SCHEMA,
+    "tracked": TRACKED_SCHEMA,
+    "creators": CREATORS_SCHEMA,
+}
 TRACKED_POLL_MS = 60_000
 
 
@@ -228,6 +246,10 @@ class Engine:
         self.requested: set[str] = set()
         # Tracked-wallet list (tracked.py); None until one is loaded.
         self.tracked: frozenset[str] | None = None
+        # Creator records (creators.py): creator -> (launches, graduated, last launch ms).
+        self.creators: dict[str, tuple[int, int, int]] | None = None
+        self.creator_launches: dict[str, int] = {}  # creator -> newest launch seen live
+        self.creator_pruned_ms = 0
         # Rewritten on every flush, so a report can read a run that is still going.
         self.summary_path: Path | None = None
         self.summary_extra: dict = {}
@@ -250,6 +272,7 @@ class Engine:
         if is_classic(row):
             tok = self.tokens[row["mint"]] = TokenState.from_create(row)
             tok.copycat = copycat
+            self._stamp_creator(tok)
             self.stats["classic_creates"] += 1
             self.stats["copycats"] += copycat
 
@@ -312,6 +335,39 @@ class Engine:
             ts, None, None, "gap", "stream dropped; open tokens get no new entries", None
         )
 
+    def on_creators(self, row: dict) -> None:
+        """A creator-record file took effect (loaded live, or replayed)."""
+        self._advance(row["received_ms"])
+        self.creators = {
+            c: (n, g, t)
+            for c, n, g, t in zip(
+                row["creators"],
+                row["launches"],
+                row["graduated"],
+                row["last_launch_ms"],
+                strict=True,
+            )
+        }
+        self.stats["creator_files"] += 1
+
+    def _stamp_creator(self, tok: TokenState) -> None:
+        """Give a new token its creator's record, from the file and launches seen live."""
+        rec = self.creators.get(tok.creator) if self.creators is not None else None
+        seen = self.creator_launches.get(tok.creator)
+        earlier = [t for t in (seen, rec[2] if rec else None) if t is not None]
+        earlier = [t for t in earlier if t < tok.created_ms]
+        recent = any(tok.created_ms - t <= RECENT_LAUNCH_MS for t in earlier)
+        if self.creators is not None:
+            tok.creator_graduates = rec[1] if rec else 0
+            tok.creator_recent_launch = recent
+        elif recent:
+            tok.creator_recent_launch = True
+        self.creator_launches[tok.creator] = tok.created_ms
+        if tok.created_ms - self.creator_pruned_ms >= 3_600_000:  # hourly: forget old ones
+            cut = tok.created_ms - RECENT_LAUNCH_MS
+            self.creator_launches = {c: t for c, t in self.creator_launches.items() if t >= cut}
+            self.creator_pruned_ms = tok.created_ms
+
     def on_tracked(self, row: dict) -> None:
         """A tracked-wallet list took effect (loaded live, or replayed from the recording)."""
         self._advance(row["received_ms"])
@@ -321,11 +377,20 @@ class Engine:
     def on_lookup(self, row: dict) -> None:
         """A recorded or live answer to a lookup request."""
         self._advance(row["received_ms"])
+        result = json.loads(row["result"]) if row["result"] is not None else None
+        if result is not None and result.get("narrative_update"):
+            # The narrative judge's later verdict (holders.LookupWorker): add it to the
+            # token's lookup result; the lookup's own time and checks stay as they were.
+            self.stats["narratives_done"] += 1
+            known = self.results_by_mint.get(row["mint"])
+            if known is not None:
+                known.update({k: v for k, v in result.items() if k != "narrative_update"})
+            return
         self.stats["lookups_done" if row["error"] is None else "lookup_errors"] += 1
         if row["mint"] in self.tokens:
             self.lookups[row["mint"]] = row
-            if row["error"] is None and row["result"] is not None:
-                self.results_by_mint[row["mint"]] = json.loads(row["result"])
+            if row["error"] is None and result is not None:
+                self.results_by_mint[row["mint"]] = result
 
     def finish(self) -> None:
         """End of data: land orders in flight, then value open positions."""
@@ -740,6 +805,7 @@ def recorded_events(root: Path = LIVE) -> Iterator[tuple[str, dict | int]]:
         ("trade", "trade"),
         ("lookup", "lookups"),
         ("tracked", "tracked"),
+        ("creators", "creators"),
     )
     for kind, table in tables:
         df = read_table(root, table)
@@ -778,6 +844,9 @@ def run_replay(engine: Engine, root: Path = LIVE) -> None:
         elif kind == "tracked":
             assert isinstance(item, dict)
             engine.on_tracked(item)
+        elif kind == "creators":
+            assert isinstance(item, dict)
+            engine.on_creators(item)
         elif kind == "create":
             assert isinstance(item, dict)
             engine.on_create(item)
@@ -787,10 +856,12 @@ def run_replay(engine: Engine, root: Path = LIVE) -> None:
     engine.finish()
 
 
-class TrackedFeed:
-    """Loads the tracked-wallet list when its file changes and records each load."""
+class _FileFeed:
+    """Loads a nightly file when it changes and records each load with the run's events."""
 
-    def __init__(self, engine: Engine, sink: Sink, path: Path = TRACKED_PATH) -> None:
+    table = ""
+
+    def __init__(self, engine: Engine, sink: Sink, path: Path) -> None:
         self.engine, self.sink, self.path = engine, sink, path
         self.mtime_ms: int | None = None
         self.checked_ms: int | None = None
@@ -805,20 +876,62 @@ class TrackedFeed:
             return
         if mtime == self.mtime_ms:
             return
-        wallets = load_list(self.path)
-        if wallets is None:
+        fields = self.read()
+        if fields is None:
             return
         self.mtime_ms = mtime
-        row = {
-            "seq": next_seq(),
-            "received_ms": ts,
-            "event_index": 0,
-            "list_mtime_ms": mtime,
-            "wallets": sorted(wallets),
-        }
-        self.sink.add("tracked", [row])
+        row = {"seq": next_seq(), "received_ms": ts, "event_index": 0, "list_mtime_ms": mtime}
+        row |= fields
+        self.sink.add(self.table, [row])
+        self.apply(row)
+
+    def read(self) -> dict | None:
+        raise NotImplementedError
+
+    def apply(self, row: dict) -> None:
+        raise NotImplementedError
+
+
+class TrackedFeed(_FileFeed):
+    """The tracked-wallet list (tracked.py)."""
+
+    table = "tracked"
+
+    def __init__(self, engine: Engine, sink: Sink, path: Path = TRACKED_PATH) -> None:
+        super().__init__(engine, sink, path)
+
+    def read(self) -> dict | None:
+        wallets = load_list(self.path)
+        return None if wallets is None else {"wallets": sorted(wallets)}
+
+    def apply(self, row: dict) -> None:
         self.engine.on_tracked(row)
-        print(f"tracked-wallet list loaded: {len(wallets)} wallets", flush=True)
+        print(f"tracked-wallet list loaded: {len(row['wallets'])} wallets", flush=True)
+
+
+class CreatorFeed(_FileFeed):
+    """Creator records (creators.py)."""
+
+    table = "creators"
+
+    def __init__(self, engine: Engine, sink: Sink, path: Path = CREATORS_PATH) -> None:
+        super().__init__(engine, sink, path)
+
+    def read(self) -> dict | None:
+        recs = load_creators(self.path)
+        if recs is None:
+            return None
+        names = sorted(recs)
+        return {
+            "creators": names,
+            "launches": [recs[c][0] for c in names],
+            "graduated": [recs[c][1] for c in names],
+            "last_launch_ms": [recs[c][2] for c in names],
+        }
+
+    def apply(self, row: dict) -> None:
+        self.engine.on_creators(row)
+        print(f"creator records loaded: {len(row['creators'])} creators", flush=True)
 
 
 def run_live(engine: Engine, minutes: float | None, events_dir: Path) -> None:
@@ -838,11 +951,13 @@ def run_live(engine: Engine, minutes: float | None, events_dir: Path) -> None:
     )
     engine.holder_checks = True
     engine.request_lookup = worker.request
-    feed = TrackedFeed(engine, sink)
-    feed.poll(now_ms())
+    feeds = [TrackedFeed(engine, sink), CreatorFeed(engine, sink)]
+    for feed in feeds:
+        feed.poll(now_ms())
 
     def on_rows(creates: list[dict], trades: list[dict]) -> None:
-        feed.poll(now_ms())
+        for feed in feeds:
+            feed.poll(now_ms())
         engine.on_rows(creates, trades)
 
     async def stream() -> None:

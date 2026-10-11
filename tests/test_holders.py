@@ -164,3 +164,64 @@ def test_recorded_lookups_replay_and_switch_checks_on(tmp_path):
     run_replay(eng, tmp_path)
     assert eng.holder_checks and eng.stats["lookups_done"] == 1
     assert len(eng.results) == 1  # entered after the lookup; valued at the end
+
+
+def test_worker_delivers_holders_first_and_the_narrative_after(monkeypatch):
+    import asyncio
+
+    import cryptobot.holders as holders
+
+    rows, judged = [], []
+    monkeypatch.setattr(
+        holders, "fetch_metadata", lambda uri: {"twitter": "https://x.com/a/status/1"}
+    )
+
+    def judge(token):
+        judged.append(token)
+        return {"score": 4, "theme": "t", "red_flags": []}
+
+    seq = iter(range(100))
+    worker = holders.LookupWorker(
+        rows.append, lambda r: None, lambda: next(seq), lambda: 7, judge=judge
+    )
+    worker.call = lambda method, params: {"value": []} if method == "getMultipleAccounts" else []
+
+    async def go():
+        task = asyncio.create_task(worker.run())
+        worker.request(MINT, [], "u", 5, "Name", "SYM")
+        for _ in range(100):
+            if len(rows) == 2:
+                break
+            await asyncio.sleep(0.01)
+        task.cancel()
+
+    asyncio.run(go())
+    first, second = (json.loads(r["result"]) for r in rows)
+    assert "narrative" not in first and first["x_kind"] == "tweet"  # holders come first
+    assert second == {
+        "narrative_update": True,
+        "narrative": {"score": 4, "theme": "t", "red_flags": []},
+    }
+    assert judged == [
+        {
+            "name": "Name",
+            "symbol": "SYM",
+            "x_link": "https://x.com/a/status/1",
+            "x_kind": "tweet",
+            "telegram": None,
+            "website": None,
+            "description": None,
+        }
+    ]
+
+
+def test_engine_merges_a_later_narrative_without_moving_the_lookup():
+    eng = Engine([])
+    eng.on_create(create_row())
+    eng.on_lookup(lookup_row(CLEAN, 1_000))
+    update = {"narrative_update": True, "narrative": {"score": 3, "theme": "t", "red_flags": []}}
+    eng.on_lookup(lookup_row(update, 9_000))
+    assert eng.lookups[MINT]["received_ms"] == 1_000
+    assert eng.results_by_mint[MINT]["narrative"]["score"] == 3
+    assert eng.results_by_mint[MINT]["x_kind"] == "community"
+    assert eng.stats["narratives_done"] == 1 and eng.stats["lookups_done"] == 1

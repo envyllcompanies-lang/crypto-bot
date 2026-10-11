@@ -25,6 +25,9 @@ BUNDLE_CANDLE_MULT = 2.0
 # Wallets whose first buy lands in the create slot or the next one count as insiders
 # (with the creator), the definition loopholetape/pumpfun-launches uses for bundles.
 INSIDER_SLOTS = 1
+# The first buyers after launch: in high-risk tokens they hold far more of the supply
+# (MELT, arXiv 2602.13480: first 10 buyers +17 points). The dev is counted separately.
+EARLY_BUYERS = 10
 # Copycats: a launch reusing a name or symbol seen in this window. Originals graduate
 # about ten times as often as copycats (research report); the window is our choice.
 SHOWN_CHARS = 40  # creator-written names are cut to this in logs
@@ -96,6 +99,11 @@ class TokenState:
     name: str = ""  # creator-written, untrusted: shown in reports and judged, never acted on
     symbol: str = ""
     copycat: bool = False  # name or symbol reused from a launch in the previous 24 hours
+    early_buyers: list[str] = field(default_factory=list)  # first EARLY_BUYERS buyers, not dev
+    # The creator's record from the nightly creator file (tracked.py) and launches seen
+    # live: None = not known (no file loaded yet).
+    creator_graduates: int | None = None  # earlier launches of this creator that graduated
+    creator_recent_launch: bool | None = None  # another launch by them in the 7 days before
 
     @classmethod
     def from_create(cls, row: dict) -> TokenState:
@@ -138,6 +146,12 @@ class TokenState:
                 self.pro_traders += 1
             if user != self.creator and row["slot"] <= self.create_slot + INSIDER_SLOTS:
                 self.insiders.add(user)
+            if (
+                user != self.creator
+                and len(self.early_buyers) < EARLY_BUYERS
+                and user not in self.early_buyers
+            ):
+                self.early_buyers.append(user)
             if self.n_sells == 0:
                 self.launch_run_mult = max(self.launch_run_mult, self.mcap_multiple)
         else:
@@ -169,6 +183,17 @@ class TokenState:
         held = [w for w, b in self.balances.items() if b > 0]
         return sorted(held, key=lambda w: (-self.balances[w], w))[:n]
 
+    @property
+    def early_buyer_share(self) -> float:
+        """Share of supply the first EARLY_BUYERS buyers (dev excluded) still hold."""
+        return sum(self.balances.get(w, 0) for w in self.early_buyers) / TOTAL_SUPPLY
+
+    @property
+    def trades_per_progress_pct(self) -> float:
+        """Trades taken per percentage point of curve progress: fewer means fewer, larger
+        buys moved it (graduates take fewer trades to reach a level, arXiv 2602.14860)."""
+        return self.n_trades / max(self.curve.progress * 100, 1.0)
+
     def tracked_holders(self, tracked: frozenset[str]) -> int:
         """How many wallets on the tracked list hold this token now."""
         return sum(1 for w, b in self.balances.items() if b > 0 and w in tracked)
@@ -199,4 +224,8 @@ class TokenState:
             "sells": self.n_sells,
             "tainted": self.tainted,
             "copycat": self.copycat,
+            "early_buyer_share": round(self.early_buyer_share, 4),
+            "trades_per_progress_pct": round(self.trades_per_progress_pct, 2),
+            "creator_graduates": self.creator_graduates,
+            "creator_recent_launch": self.creator_recent_launch,
         }

@@ -60,13 +60,15 @@ Final Stretch entries start 40 minutes into a run (see below), so run the paper 
   - all at a 2-second delay.
 
   V1's core rule (40% dip, +45%, exit at entry) also runs at 1 s and 5 s delays, with a 10-minute stall exit, and with a largest-holder-sells exit.
-- **Narrative judge** (`narrative.py`). The same once-per-token lookup sends the token's name, symbol, description and links (plus the text of a linked tweet, from X's free oEmbed endpoint) to a free LLM tier, which rates the narrative 1-5 and lists red flags (copycat, low effort, scam signs, offensive, no story, impersonation):
+- **Narrative judge** (`narrative.py`). After the holder lookup is delivered, a separate queue sends the token's name, symbol, description and links (plus the text of a linked tweet, from X's free oEmbed endpoint) to a free LLM tier, which rates the narrative 1-5 and lists red flags (copycat, low effort, scam signs, offensive, no story, impersonation):
   - Groq first (`GROQ_API_KEY`), Gemini as the fallback (`GEMINI_API_KEY`). Both have free tiers.
   - Keys go in `~/crypto-bot/.env` on the server, typed in by the owner (see `deploy/README.md`). They are never printed or logged.
-  - With no key, or when a call fails or a free quota runs out, the narrative is "not evaluated" and scores a neutral value.
+  - Its verdict arrives as a later lookup row and is logged next to the token's conviction as a "shadow" field. It scores nothing and no entry waits for it: the research found no evidence that narrative themes predict outcomes, so it must first prove itself on recorded data (M4).
+  - With no key, or when a call fails or a free quota runs out, the narrative is "not evaluated".
   - Token text is written by its creator, so it is sent as truncated, clearly marked data, and only an answer in a strict JSON shape is accepted.
 - **Copycats.** A launch whose name or symbol (ignoring case and spaces) was used by another launch in the previous 24 hours is flagged a copycat.
-- **Conviction layer** (`conviction.py`, our proposal on top of V1). Each young token gets a 0-100 score from its narrative score (up to 40 points), X link type, top-5 holder balances, dev and insider shares, pro traders, copycat flag and launch candle, minus 10 per red flag:
+- **Creator records** (`creators.py`). A nightly job counts, for every creator seen in the last 14 days of recordings, their launches and how many graduated. The trader reloads the file within a minute and adds launches it sees during the run.
+- **Conviction layer** (`conviction.py`, our proposal on top of V1). Each young token gets a 0-100 score from structural signals with published evidence: not a copycat (20), creator record (+15 for an earlier graduate, -10 for another launch in the last 7 days), the share held by the first 10 buyers (12), trades needed per point of curve progress (8), dev and insider shares (8 each), top-5 balances not alike (8), no bundle launch candle (6), pro traders (6) and X link type (up to 4), minus 10 for a copycat. The parts add up to 95 at most:
   - 80 or more: very high, buy at once;
   - 65-80: good, buy a 25% dip from the high;
   - 50-65: average, buy a 40% dip;
@@ -82,7 +84,7 @@ Final Stretch entries start 40 minutes into a run (see below), so run the paper 
   A test proves the paper engine gives the same trades as the M2 replay engine.
 - **Tracked wallets.** V1's "few tracked wallets" check uses a list built nightly from the server's own recorded trades (`tracked.py`). It keeps wallets that made money across several tokens after fees, drops bots, snipers and token creators, and tests the list on later data it wasn't built from. A candidate passes with at most 2 listed holders. Until the first list is built, the check is "not evaluated". A lookup that fails is also recorded as "not evaluated" for that token.
 - **Wallets.** Each variant starts with its own 1 SOL paper wallet. The report shows each wallet's cash, the value of its open positions (sold into the current curve after fees) and the two together (equity).
-- **Report.** It opens with "V1 as stated" (V1's core rule in each universe, and the conviction variants), then conviction results by tier, and a spot-check list of the last 25 entries with each token's mint, name, X link, conviction and narrative, to check by hand in Axiom or Padre. The full grid follows under "Experiments".
+- **Report.** It opens with "V1 as stated" (V1's core rule in each universe, and the conviction variants), then conviction results by tier, and a spot-check list of the last 25 entries with each token's mint, name, X link, conviction and narrative, to check by hand in Axiom or Padre. Then feed lag and lookup delay (how long entries waited for the holder lookup, and how long the narrative verdict took). The full grid follows under "Experiments".
 - **Output.** `data/paper/<run>/` holds `decisions`, `trades` and `gates` as Parquet, plus `variants.json`, `summary.json` and the raw `events/`. See `data/README.md`.
 
 ## Trade size

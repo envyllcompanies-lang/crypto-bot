@@ -239,8 +239,16 @@ def classify(result: dict, now_ms: int) -> dict[str, bool | None]:
     }
 
 
+NARRATIVE_FIELDS = ("x_link", "x_kind", "telegram", "website", "description")
+
+
 class LookupWorker:
-    """Runs lookups one at a time beside the live stream and hands each result back."""
+    """Runs lookups one at a time beside the live stream and hands each result back.
+
+    The narrative judge is slow (an LLM call, rate-limited) and scores nothing, so it runs
+    in its own queue after the holder lookup is delivered: entries never wait for it. Its
+    verdict arrives as a second lookup row whose result is {"narrative_update": true, ...}.
+    """
 
     def __init__(
         self,
@@ -256,6 +264,7 @@ class LookupWorker:
         self.next_seq, self.now_ms = next_seq, now_ms
         self.call = throttled(url)
         self.judge = judge
+        self.narratives: asyncio.Queue[tuple] = asyncio.Queue()
 
     def request(
         self, mint: str, wallets: list[str], uri: str, ts: int, name: str, symbol: str
@@ -266,16 +275,37 @@ class LookupWorker:
             self.queue.put_nowait((mint, wallets, uri, ts, name, symbol))
 
     async def run(self) -> None:
+        await asyncio.gather(self._lookups(), self._judge())
+
+    async def _lookups(self) -> None:
         while True:
             mint, wallets, uri, ts, name, symbol = await self.queue.get()
             result, error = None, None
             try:
                 result = await asyncio.to_thread(
-                    lookup, wallets, uri, self.call, fetch_metadata, name, symbol, self.judge
+                    lookup, wallets, uri, self.call, fetch_metadata, name, symbol, None
                 )
             except Exception as exc:  # recorded; the holder checks are then not evaluated
                 error = type(exc).__name__
             self._deliver(mint, ts, result, error)
+            if result is not None and self.judge is not None:
+                if self.narratives.qsize() < MAX_QUEUE:
+                    token = {"name": name, "symbol": symbol}
+                    token |= {k: result.get(k) for k in NARRATIVE_FIELDS}
+                    self.narratives.put_nowait((mint, ts, token))
+
+    async def _judge(self) -> None:
+        while True:
+            mint, ts, token = await self.narratives.get()
+            out: dict = {"narrative_update": True}
+            try:
+                verdict = await asyncio.to_thread(self.judge, token)
+            except Exception as exc:  # recorded; the narrative is then not evaluated
+                out["narrative_error"] = str(exc)[:200] or type(exc).__name__
+            else:
+                if verdict is not None:
+                    out["narrative"] = verdict
+            self._deliver(mint, ts, out, None)
 
     def _deliver(self, mint: str, ts: int, result: dict | None, error: str | None) -> None:
         row = {

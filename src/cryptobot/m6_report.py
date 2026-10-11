@@ -99,6 +99,56 @@ def lag_section(events: Path) -> list[str]:
     return [*lines, ""]
 
 
+def lookup_delays(events: Path) -> pl.DataFrame | None:
+    """Seconds from asking for a token's holder lookup to each answer, by kind.
+
+    "holders" is the lookup entries wait for (holders, funders, metadata); "narrative" is
+    the AI judge's later verdict, which no entry waits for. Both count from the request.
+    """
+    if not events.exists():
+        return None
+    table = read_table(events, "lookups")
+    if table is None or table.is_empty():
+        return None
+    narrative = pl.col("result").fill_null("").str.contains('"narrative_update": true')
+    return (
+        table.select(
+            kind=pl.when(narrative).then(pl.lit("narrative")).otherwise(pl.lit("holders")),
+            failed=pl.col("error").is_not_null(),
+            delay=(pl.col("received_ms") - pl.col("requested_ms")) / 1000,
+        )
+        .group_by("kind")
+        .agg(
+            n=pl.len(),
+            failed=pl.col("failed").sum(),
+            median=pl.col("delay").median(),
+            p90=pl.col("delay").quantile(0.9),
+            worst=pl.col("delay").max(),
+        )
+        .sort("kind")
+    )
+
+
+def lookup_section(events: Path) -> list[str]:
+    lines = [
+        "## Lookup delay",
+        "",
+        "Seconds from requesting a token's checks to the answer. Entries wait for the holder "
+        "lookup only; the narrative verdict is logged later and gates nothing.",
+        "",
+    ]
+    table = lookup_delays(events)
+    if table is None:
+        return [*lines, "No lookups in this run.", ""]
+    lines += ["| Lookup | Answers | Failed | Median | 90th percentile | Worst |"]
+    lines += ["|---|---|---|---|---|---|"]
+    for kind, n, failed, median, p90, worst in table.iter_rows():
+        lines.append(
+            f"| {kind} | {n:,} | {failed:,} | {median:.2f} s | {p90:.2f} s | {worst:.2f} s |"
+        )
+    return [*lines, ""]
+
+
 def core_name() -> str:
     drop, target, stop = (round(x * 100) for x in CORE)
     return f"dip{drop}|tp{target}|sl{stop}|d2s"
@@ -370,6 +420,7 @@ def report(run: Path) -> list[str]:
     ]
     lines = lines[:5] + v1_lines + lines[5:]  # right after the title block
     lines += lag_section(Path(summary["source"]))
+    lines += lookup_section(Path(summary["source"]))
 
     lines += ["## Experiments: every variant", ""]
     if table is None:
@@ -430,9 +481,11 @@ def caveats(n_trades: int) -> list[str]:
         "- The funnel counts tokens whose rules passed at least once; the gates table logs only "
         "changes between pass and fail.",
         "- Conviction (conviction.py) is our own proposal on top of V1, not V1's rule. Its "
-        "weights and tier cut-offs are first guesses to be tuned on these results. Its "
-        "narrative score comes from a free LLM tier (Groq, then Gemini) and is 'not evaluated' "
-        "(a neutral score) when no key is set, a call fails or a free quota runs out.",
+        "weights and tier cut-offs are first guesses to be tuned on these results. Its points "
+        "come from structural signals with published evidence (copycat, creator record, "
+        "early-buyer share, trades to climb the curve, dev and insider shares, holder "
+        "checks). The LLM narrative score (Groq, then Gemini, free tiers) is shown but scores "
+        "nothing: it is logged until it beats the on-chain signals on later data.",
         "- Copycats are counted against launches seen since the run started, so a run's first "
         "24 hours find fewer of them.",
         "",
