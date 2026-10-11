@@ -39,7 +39,9 @@ from cryptobot.curve import to_lamports, to_sol
 from cryptobot.paper import OUT_SCHEMAS, PAPER, START_BALANCE, Engine
 from cryptobot.recorder import Sink
 from cryptobot.slinky import SLINKY_ROOT, events, files
-from cryptobot.v1 import default_variants
+from cryptobot.v1 import default_variants, scalp_variants
+
+GRIDS = {"default": default_variants, "scalp": scalp_variants}
 
 BACKTEST = PAPER.parent / "backtest"
 PROGRESS_EVERY_MS = 3_600_000
@@ -57,8 +59,9 @@ def run(
     end: datetime | None,
     root: Path = SLINKY_ROOT,
     max_stake_sol: float = 1.0,
+    grid: str = "default",
 ) -> Engine:
-    variants = default_variants(to_lamports(max_stake_sol))
+    variants = GRIDS[grid](to_lamports(max_stake_sol))
     out.mkdir(parents=True, exist_ok=True)
     (out / "variants.json").write_text(json.dumps([v.describe() for v in variants], indent=1))
     engine = Engine(variants, out=Sink(out, OUT_SCHEMAS))
@@ -105,14 +108,20 @@ def data_span(root: Path = SLINKY_ROOT) -> tuple[datetime, datetime]:
     return chunks[0][0] - timedelta(hours=12), chunks[-1][0] + timedelta(minutes=1)
 
 
-def _part(args: tuple[Path, datetime, datetime, Path, float]) -> dict:
-    out, start, end, root, stake = args
-    engine = run(out, start, end, root, stake)
+def _part(args: tuple[Path, datetime, datetime, Path, float, str]) -> dict:
+    out, start, end, root, stake, grid = args
+    engine = run(out, start, end, root, stake, grid)
     return {"closed_trades": engine.closed_trades, "pnl": engine.closed_pnl_lamports}
 
 
 def run_parallel(
-    out: Path, start: datetime, end: datetime, jobs: int, root: Path = SLINKY_ROOT, stake=1.0
+    out: Path,
+    start: datetime,
+    end: datetime,
+    jobs: int,
+    root: Path = SLINKY_ROOT,
+    stake: float = 1.0,
+    grid: str = "default",
 ) -> dict:
     """Run `jobs` equal parts side by side, then merge them into `out`."""
     step = (end - start) / jobs
@@ -120,7 +129,7 @@ def run_parallel(
     parts = [out / "parts" / f"part{k}" for k in range(jobs)]
     # Spawn, not fork: forking a process that already runs Polars threads can deadlock.
     with ProcessPoolExecutor(jobs, mp_context=multiprocessing.get_context("spawn")) as pool:
-        jobs_args = [(p, s, e, root, stake) for p, (s, e) in zip(parts, bounds, strict=True)]
+        jobs_args = [(p, s, e, root, stake, grid) for p, (s, e) in zip(parts, bounds, strict=True)]
         list(pool.map(_part, jobs_args))
     return merge(out, parts, start, end)
 
@@ -176,15 +185,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--out", type=Path, help="run folder (default data/backtest/<now>)")
     parser.add_argument("--max-stake-sol", type=float, default=1.0)
     parser.add_argument("--jobs", type=int, default=1, help="parts run side by side")
+    parser.add_argument("--grid", choices=sorted(GRIDS), default="default", help="variant set")
     args = parser.parse_args(argv)
     out = args.out or BACKTEST / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     if args.jobs > 1:
         lo, hi = data_span()
         start, end = args.start or lo, args.end or hi
-        merged = run_parallel(out, start, end, args.jobs, stake=args.max_stake_sol)
+        merged = run_parallel(out, start, end, args.jobs, stake=args.max_stake_sol, grid=args.grid)
         print(f"{out}: {merged['closed_trades']:,} closed trades in {args.jobs} parts")
     else:
-        engine = run(out, args.start, args.end, max_stake_sol=args.max_stake_sol)
+        engine = run(out, args.start, args.end, max_stake_sol=args.max_stake_sol, grid=args.grid)
         pnl = to_sol(engine.closed_pnl_lamports)
         print(f"{out}: {engine.closed_trades:,} closed trades, {pnl:+.4f} SOL in total")
     print(f"report: uv run python -m cryptobot.m6_report {out}")

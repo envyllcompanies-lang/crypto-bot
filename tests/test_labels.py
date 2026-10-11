@@ -30,7 +30,10 @@ def test_labels_join_outcomes_to_features_and_narrative(tmp_path):
     assert row["score"] is not None and row["pts_not_copycat"] == 20
     assert row["win"] == (row["pnl_lamports"] > 0)
     text = "\n".join(report(df))
-    assert "- Tokens: 1 from 1 run(s) (paper: 1)" in text
+    assert "- Label trades: 1 from 1 run(s) (paper: 1)" in text
+    assert row["exit"] == "tp45|sl0" and row["x_kind"] == "community"
+    assert row["holders_differ"] == 1 and row["funding_ok"] == 1
+    assert row["narrative_flags"] == 0
 
 
 def test_no_runs_means_no_labels(tmp_path):
@@ -72,3 +75,44 @@ def test_best_section_counts_profitable_variants():
         "- With a positive mean: 2" in text and "- With the 95% lower bound above zero: 1" in text
     )
     assert text.index("| good |") < text.index("| bad |") and "tiny" not in text
+
+
+def test_report_breaks_profit_down_by_filter_and_thesis():
+    import polars as pl
+
+    from cryptobot.labels import LIVE_ONLY, report
+
+    n = 40
+    base = {
+        "exit": ["tp5|sl10"] * n,
+        "run": ["r"] * n,
+        "source": ["paper"] * n,
+        "entry_decided_ts_ms": list(range(n)),
+        "age_s": [5.0] * n,
+        "copycat": [0] * n,
+        "pts_no_bundle_candle": [6] * n,
+        "dev_share": [0.01] * n,
+        "insider_share": [0.1] * n,
+        "largest_holder_share": [0.03] * n,
+        "early_buyer_share": [0.1] * n,
+        "creator_graduates": [0] * n,
+        "creator_recent_launch": [0] * n,
+        # Half the tokens have a legit thesis and win +10%; the rest lose 10%.
+        "x_kind": ["community" if i % 2 else "tweet" for i in range(n)],
+        "narrative_score": [5 if i % 2 else 2 for i in range(n)],
+        "narrative_flags": [0] * n,
+        "holders_differ": [1] * n,
+        "funding_ok": [1] * n,
+        "has_telegram": [0] * n,
+        "has_website": [1] * n,
+        "tracked_holders": [0] * n,
+        "net_return": [0.1 if i % 2 else -0.1 for i in range(n)],
+        "pnl_lamports": [1 if i % 2 else -1 for i in range(n)],
+    }
+    df = pl.DataFrame(base).with_columns(win=pl.col("pnl_lamports") > 0)
+    df = df.with_columns(**{c: pl.col(c).cast(t) for c, t in LIVE_ONLY.items() if c in df.columns})
+    text = "\n".join(report(df))
+    assert "| legit thesis | 20 | 100.0%" in text and "| everything else | 20 | 0.0%" in text
+    assert "| X link is a community: yes | 20 |" in text
+    assert "| 5/5 | 20 |" in text and "| 2/5 | 20 |" in text
+    assert "| + top-5 funding not clustered (live) | 40 |" in text

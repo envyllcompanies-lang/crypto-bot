@@ -184,6 +184,8 @@ def _lookup_features(result: dict | None) -> dict:
         if narrative is None
         else {k: narrative.get(k) for k in ("score", "theme", "red_flags")},
         "narrative_error": result.get("narrative_error"),
+        "has_telegram": bool(result.get("telegram")),
+        "has_website": bool(result.get("website")),
     }
 
 
@@ -456,12 +458,12 @@ class Engine:
             elif u.kind != "conviction" and tok.mint in self.results_by_mint:
                 checks.update(classify(self.results_by_mint[tok.mint], row["received_ms"]))
         result = self.results_by_mint.get(tok.mint)
+        row = self.lookups.get(tok.mint)
+        lookup_ms = None if row is None or result is None else row["received_ms"]
         if u.kind == "conviction":
-            row = self.lookups.get(tok.mint)
-            lookup_ms = None if row is None or result is None else row["received_ms"]
             if self.offline and result is None:
                 result, lookup_ms = OFFLINE, ts  # backtest: no lookups (conviction.OFFLINE)
-            conv = conviction(tok, result, lookup_ms, ts)
+            conv = conviction(tok, result, lookup_ms, ts, measure_only=u.labels)
             if conv is not None and u.narrative_gate:
                 assert result is not None
                 conv = narrative_gate(conv, result)
@@ -479,6 +481,8 @@ class Engine:
         if self.gates.get(key) != ok:
             self.gates[key] = ok
             features = tok.snapshot(ts) | _lookup_features(result)
+            if result is not None and not result.get("offline") and lookup_ms is not None:
+                features["lookup_checks"] = classify(result, lookup_ms)
             if self.tracked is not None:
                 features["tracked_holders"] = tok.tracked_holders(self.tracked)
             if u.kind == "conviction":

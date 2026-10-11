@@ -116,8 +116,17 @@ def _linear(value: float, full: float, zero: float, points: float) -> float:
     return points * (zero - value) / (zero - full)
 
 
-def blocks(tok: TokenState, result: dict | None, lookup_ms: int | None, now_ms: int) -> list[str]:
-    """Reasons the token may never be traded on conviction; empty if none."""
+def blocks(
+    tok: TokenState,
+    result: dict | None,
+    lookup_ms: int | None,
+    now_ms: int,
+    measure_only: bool = False,
+) -> list[str]:
+    """Reasons the token may never be traded on conviction; empty if none.
+
+    `measure_only` (the labels universe) keeps the funding check out: labels must see
+    clustered tokens too, or nobody can measure whether that filter helps."""
     out = []
     if tok.tainted:
         out.append("tainted")
@@ -127,22 +136,28 @@ def blocks(tok: TokenState, result: dict | None, lookup_ms: int | None, now_ms: 
         out.append("older_than_40m")
     if result is None or lookup_ms is None:
         out.append("no_lookup")
-    elif not result.get("offline") and funding_clustered(
-        result["funders"], result["first_ms"], lookup_ms
+    elif (
+        not measure_only
+        and not result.get("offline")
+        and funding_clustered(result["funders"], result["first_ms"], lookup_ms)
     ):
         out.append("funding_clustered")
     return out
 
 
 def conviction(
-    tok: TokenState, result: dict | None, lookup_ms: int | None, now_ms: int
+    tok: TokenState,
+    result: dict | None,
+    lookup_ms: int | None,
+    now_ms: int,
+    measure_only: bool = False,
 ) -> Conviction | None:
     """The token's conviction now, or None if a hard block applies.
 
     `result` is the lookup's parsed result (None if not done or failed) and `lookup_ms`
     the time it arrived, which is when its funding times were judged fresh or not.
     """
-    if blocks(tok, result, lookup_ms, now_ms):
+    if blocks(tok, result, lookup_ms, now_ms, measure_only):
         return None
     assert result is not None
     flags = {"copycat"} if tok.copycat else set()

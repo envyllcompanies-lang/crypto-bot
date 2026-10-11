@@ -252,12 +252,17 @@ def conviction_variant(
     return Variant(name, u, strategy, fill, conviction=True, shadow=shadow)
 
 
+# Exits the shadow labels universe measures on every eligible token: V1's +45% with its
+# exit at entry, and the two best scalps of the 11 Oct backtest (+5% and +10%, -10% stop).
+LABEL_EXITS = ((0.45, 0.0), (0.05, 0.10), (0.10, 0.10))
+
+
 def default_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
     """The grid run side by side, for New Pairs and each Final Stretch cut-off: every
     entry x target x stop at a 2 s delay, plus V1's core rule at 1 s and 5 s delays,
     with a 10-minute stall, and with the largest-holder-sells exit. Then the conviction
     universe (ungated, narrative-gated, and the random control) with every target x stop
-    at a 2 s delay, and one shadow labels variant with V1's exits."""
+    at a 2 s delay, and shadow labels variants with LABEL_EXITS."""
     if max_stake > HARD_MAX_STAKE:
         raise ValueError("max_stake is above the 1.5 SOL hard cap")
     out = []
@@ -275,5 +280,18 @@ def default_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
         control_universe(max_stake),
     ):
         out += [conviction_variant(u, t, s) for t in TARGETS for s in STOP_TOLERANCES]
-    out.append(conviction_variant(labels_universe(max_stake), *CORE[1:], shadow=True))
+    labels = labels_universe(max_stake)
+    out += [conviction_variant(labels, t, s, shadow=True) for t, s in LABEL_EXITS]
     return out
+
+
+# Scalping (owner, 11 Oct 2026): small targets, tight stops. Shadow variants on the labels
+# universe (every eligible token, entered the moment it qualifies, no wallet limit), so
+# each target and stop is measured on the same tokens; filter them afterwards by features.
+SCALP_TARGETS = (0.05, 0.10, 0.15, 0.20, 0.30, 0.45)
+SCALP_STOPS = (0.0, 0.05, 0.10)
+
+
+def scalp_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
+    u = labels_universe(max_stake)
+    return [conviction_variant(u, t, s, shadow=True) for t in SCALP_TARGETS for s in SCALP_STOPS]

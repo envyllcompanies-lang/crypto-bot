@@ -461,3 +461,10 @@ def test_offline_conviction_for_backtests_without_lookups():
     assert c is not None  # no lookup, yet not blocked
     assert c.reasons["holders_differ"] == 4 and c.reasons["x_link"] == 1
     assert c.score == BASE - 4 - 3  # half the holder points; X link not evaluated
+
+
+def test_labels_measure_tokens_that_conviction_blocks_for_clustered_funding():
+    tok = clean_token()
+    assert blocks(tok, BUNDLE, 4_000, NOW) == ["funding_clustered"]
+    assert conviction(tok, BUNDLE, 4_000, NOW) is None
+    assert conviction(tok, BUNDLE, 4_000, NOW, measure_only=True) is not None
