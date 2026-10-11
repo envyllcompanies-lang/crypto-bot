@@ -4,7 +4,10 @@ import pytest
 
 from cryptobot.conviction import MAX_AGE_MS, blocks, conviction
 from cryptobot.features import TokenState
-from tests.test_holders import BUNDLE, CLEAN
+from cryptobot.paper import EVENT_SCHEMAS, OUT_SCHEMAS, Engine, read_table, run_replay
+from cryptobot.recorder import Sink
+from cryptobot.v1 import conviction_universe, conviction_variant
+from tests.test_holders import BUNDLE, CLEAN, lookup_row
 from tests.test_paper import Tape, create_row
 
 NOW = 6_000
@@ -76,11 +79,6 @@ def test_hard_blocks():
 
 
 # Engine -------------------------------------------------------------------------------
-
-from cryptobot.paper import EVENT_SCHEMAS, OUT_SCHEMAS, Engine, read_table, run_replay  # noqa: E402
-from cryptobot.recorder import Sink  # noqa: E402
-from cryptobot.v1 import conviction_universe, conviction_variant  # noqa: E402
-from tests.test_holders import lookup_row  # noqa: E402
 
 LOOKUP_MS = 4_500
 
