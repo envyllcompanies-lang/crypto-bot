@@ -49,6 +49,10 @@ Final Stretch entries start 40 minutes into a run (see below), so run the paper 
   - Final Stretch tokens up to 40 minutes old with dev ≤5%, insiders ≤20%, pro traders ≥10 and $8K or more, ranked by market cap, skipping the top two and keeping the bottom four.
   - Dollar levels are converted at the SOL price V1 implies (launch at $4.5K). Final Stretch's curve threshold isn't stated, so 50%, 75% and 87% each run as their own universe.
   - The column ranking needs every token up to 40 minutes old, so Final Stretch takes no entries in a run's first 40 minutes.
+  - Once a token passes every other rule, the trader looks up V1's last checks, free, once per token, and entries wait for the answer:
+    - whether its X link is a community (from the token's own metadata file; no X scraping);
+    - whether the top-5 holders' SOL balances look alike (several small wallets under 1 SOL);
+    - whether their funding is clustered (3 or more share a funder, or were created in the last hour).
 - **Variants.** Each universe runs every combination of these side by side, each variant with its own 1 SOL paper wallet:
   - entry: no dip, or a drop of 25%, 40% or 50% from the high;
   - target: +45%, +50% or +100%;
@@ -63,11 +67,8 @@ Final Stretch entries start 40 minutes into a run (see below), so run the paper 
   - Fees are charged as through Terminal with a referral code, and token-account rent is refunded.
 
   A test proves the paper engine gives the same trades as the M2 replay engine.
-- **Not evaluated.** These V1 checks need extra RPC calls or token metadata, so they're recorded as "not evaluated" and results are V1 without them:
-  - whether the X link is a community;
-  - whether the top-5 holders' SOL balances look alike;
-  - whether their funding sources and times cluster;
-  - the number of tracked wallets.
+- **Not evaluated.** V1's "few tracked wallets" check needs a curated list of known traders' wallets, which we don't have, so it's recorded as "not evaluated". A lookup that fails is also recorded as "not evaluated" for that token.
+- **Wallets.** Each variant starts with its own 1 SOL paper wallet; the report shows each wallet's balance.
 - **Output.** `data/paper/<run>/` holds `decisions`, `trades` and `gates` as Parquet, plus `variants.json`, `summary.json` and the raw `events/`. See `data/README.md`.
 
 ## Trade size

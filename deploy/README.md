@@ -40,12 +40,13 @@ Oracle's Always Free tier is permanent; only its $300 trial credit ends after 30
 ## 4. Install and start (on the server)
 
 ```bash
-git clone -b claude/focused-pasteur-1utc3l https://github.com/envyllcompanies-lang/crypto-bot.git ~/crypto-bot && bash ~/crypto-bot/deploy/setup.sh
+sudo apt-get update -qq && sudo apt-get install -y -qq git curl ca-certificates && git clone -b claude/focused-pasteur-1utc3l https://github.com/envyllcompanies-lang/crypto-bot.git ~/crypto-bot && bash ~/crypto-bot/deploy/setup.sh
 ```
 
 This installs uv, Python 3.12 and the pinned packages, then runs the tests. It also starts two things:
 
 - the paper trader, as a service that restarts after a crash or a reboot;
+- an update check every 15 minutes: new commits on GitHub are pulled and tested, and the trader restarts only if the tests pass;
 - a daily job at 00:10 UTC that writes `data/reports/<date>-paper.md` and deletes raw events older than 14 days.
 
 ## Everyday commands (on the server)
@@ -55,7 +56,8 @@ This installs uv, Python 3.12 and the pinned packages, then runs the tests. It a
 | Is it running? | `systemctl status crypto-bot` |
 | Live log | `journalctl -u crypto-bot -f` |
 | Report so far | `cd ~/crypto-bot && ~/.local/bin/uv run python -m cryptobot.m6_report` |
-| Update to the latest code | `bash ~/crypto-bot/deploy/setup.sh` |
+| Update now (it also updates itself every 15 minutes) | `bash ~/crypto-bot/deploy/setup.sh` |
+| Update log | `journalctl -u crypto-bot-update` |
 | Stop / start | `sudo systemctl stop crypto-bot` / `sudo systemctl start crypto-bot` |
 
 ## Optional: daily report pushed to GitHub

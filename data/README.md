@@ -74,6 +74,8 @@ Hugging Face search, so it is either private or deleted. Slinky21 replaces it.
     rule's result (null = not evaluated) and the token's features.
   - `variants.json`: the settings of each variant. `summary.json`: counts and final
     wallet balances.
-  - `events/` (live runs only): the raw stream, in the recorder's layout, so the run can
-    be replayed exactly.
+  - `events/` (live runs only): the raw stream, in the recorder's layout, plus `lookups`
+    (each holder and X-link lookup: top-5 wallets, their SOL balances, first-transaction
+    times and funders, and the token's X, Telegram and website links), so the run can be
+    replayed exactly.
 - **Report:** `uv run python -m cryptobot.m6_report [RUN_DIR]`.

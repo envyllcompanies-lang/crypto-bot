@@ -27,13 +27,7 @@ cd "$DIR"
 "$UV" run --frozen pytest -q
 
 echo "== services"
-for unit in crypto-bot.service crypto-bot-daily.service crypto-bot-daily.timer; do
-  sed -e "s|@USER@|$USER|g" -e "s|@DIR@|$DIR|g" "deploy/$unit" \
-    | sudo tee "/etc/systemd/system/$unit" >/dev/null
-done
-sudo systemctl daemon-reload
-sudo systemctl enable --now crypto-bot-daily.timer
-sudo systemctl enable crypto-bot.service
+bash deploy/install-units.sh
 sudo systemctl restart crypto-bot.service
 sleep 10
 systemctl --no-pager --lines=5 status crypto-bot.service || true
