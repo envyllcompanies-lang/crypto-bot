@@ -131,12 +131,6 @@ The owner wants X and other social accounts used to track virality and each toke
   - Copycat name, ticker or image.
 - **X oEmbed (free, official, no login).** Pulls the text, author and date of single public posts linked by a token. It can't read communities. `publish.twitter.com` must be on the environment's allowed domains.
 - **Manual review.** The bot lists the tokens that pass the on-chain filters, with their X links. The owner opens the links with their own X account and records a verdict: pass/fail on V1's three community checks, plus a 1-5 virality score. The bot stores verdicts next to outcomes so we can measure whether they help.
-- **Not allowed:**
-  - Logging a bot into an X account.
-  - Unofficial scrapers such as twikit.
-  - Scraping or automating x.com, or working around X's limits.
-
-  X forbids all of these, and the account would be banned.
 - **Not in the backtest.** Social features can't be backtested on the free datasets, so they are recorded live from M5 on. Log them without acting on them until forward data shows they predict outcomes.
 
 ## Data
@@ -161,7 +155,7 @@ The environment needs `huggingface.co` (datasets) and `publish.twitter.com` (oEm
 Priority (owner, 10 Oct 2026): live testing matters more than backtesting. Order from here: M5, M6, then a cut-down M3, then M4. "Live" means paper trading on live data with simulated fills; real money still only on the owner's say-so.
 
 - **M5 Recorder.** Capture live create and trade events to Parquet. Starts on the free public RPC; move to a free Helius key (owner puts it in `.env`) only if the public stream drops events. Done: `recorder.py`, `events.py`, `m5_report.py`.
-- **M6 Paper trader.** Run the V1 baseline live on recorded events with the M2 fill model and simulated fills, and log every decision. Compare against the backtest once M3 exists. Built: `paper.py` (live and replay share one engine; a test proves it matches `replay.py`), `features.py`, `v1.py`, `m6_report.py`. Proxies it uses: "pro traders" = wallets that bought at least 0.5 SOL of the token; "insiders" = the dev plus wallets that bought in the launch slot or the next one; Final Stretch = curve progress of 50%, 75% or 87%, with no entries in a run's first 40 minutes (the column ranking needs every token up to 40 minutes old). Not evaluated yet: X link type, top-5 holder SOL balances, funding sources, tracked wallets.
+- **M6 Paper trader.** Run the V1 baseline live on recorded events with the M2 fill model and simulated fills, and log every decision. Compare against the backtest once M3 exists. Built: `paper.py` (live and replay share one engine; a test proves it matches `replay.py`), `features.py`, `v1.py`, `m6_report.py`. Proxies it uses: "pro traders" = wallets that bought at least 0.5 SOL of the token; "insiders" = the dev plus wallets that bought in the launch slot or the next one; Final Stretch = curve progress of 50%, 75% or 87%, with no entries in a run's first 40 minutes (the column ranking needs every token up to 40 minutes old). X-link type and top-5 holder balance and funding checks are looked up live, once per candidate, through the free public RPC and the token's metadata file (`holders.py`); entries wait for them. Not evaluated: tracked wallets (no curated wallet list).
 - **M3 Setup scoring (cut down).** A quick V1 baseline backtest on the free data as a sanity check before rules go to paper trading. Then S1-S5 and the exit grid as time allows: win rate, average win and loss, expectancy per trade and per day, with sample sizes and confidence intervals.
 - **M4 Filter study.** Which filters and features change the results, tested out of sample on backtest and recorded live data.
 
@@ -169,7 +163,7 @@ Stop after each milestone and report before starting the next.
 
 ## Known gaps
 
-- The paper trader's "pro traders", "insiders" and Final Stretch threshold are our proxies for Terminal's labels, and four of V1's checks are not evaluated (see M6). Its results are V1 without those checks.
+- The paper trader's "pro traders", "insiders" and Final Stretch threshold are our proxies for Terminal's labels, and V1's tracked-wallets check is not evaluated (see M6). Its results are V1 without that check.
 
 - The report's two charts and its final source check were not finished.
 - Whether Pump.fun's terms exclude US persons was not confirmed; its "Prohibited Jurisdiction" definition could not be read. Terminal's terms could not be retrieved.
