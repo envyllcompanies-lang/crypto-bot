@@ -30,6 +30,12 @@ NETWORK_LEVELS_SOL = (0.0, 0.0001, 0.0005, 0.001)  # priority fee + tip per tran
 Z95 = 1.959964
 
 
+def scan_table(root: Path, table: str) -> pl.LazyFrame | None:
+    """One table of a run folder, lazily, or None if it has no files."""
+    files = sorted((root / table).glob("*/*.parquet"))
+    return pl.scan_parquet(files) if files else None
+
+
 def latest_run(root: Path = PAPER) -> Path:
     runs = sorted(p for p in root.iterdir() if (p / "summary.json").exists())
     if not runs:
@@ -288,6 +294,47 @@ def tier_section(trades: pl.DataFrame | None, conviction_universes: dict[str, st
     return [*lines, ""]
 
 
+BEST_SHOWN = 10
+
+
+def best_section(trades: pl.DataFrame | None) -> list[str]:
+    """Is any variant profitable? The best by mean net return, with a 95% interval on the
+    mean (normal approximation), among variants with at least MIN_TRADES trades."""
+    lines = [
+        "## Is any variant profitable?",
+        "",
+        f"Wallet variants with at least {MIN_TRADES} closed trades, best mean net return per "
+        "trade first (after fees, before network costs). The interval is a 95% interval on "
+        "the mean. With this many variants, the best is the luckiest as well as the best: "
+        "only a lower bound above zero, confirmed on later data, would count.",
+        "",
+    ]
+    if trades is None or trades.is_empty():
+        return [*lines, "No closed trades.", ""]
+    table = (
+        trades.group_by("variant")
+        .agg(n=pl.len(), exp=pl.col("net_return").mean(), sd=pl.col("net_return").std())
+        .filter(pl.col("n") >= MIN_TRADES)
+        .with_columns(half=Z95 * pl.col("sd") / pl.col("n").sqrt())
+        .sort("exp", descending=True)
+    )
+    positive = table.filter(pl.col("exp") > 0).height
+    proven = table.filter(pl.col("exp") - pl.col("half") > 0).height
+    lines += [
+        f"- Variants with at least {MIN_TRADES} trades: {table.height}",
+        f"- With a positive mean: {positive}",
+        f"- With the 95% lower bound above zero: {proven}",
+        "",
+        "| Variant | Trades | Mean net return [95% CI] |",
+        "|---|---|---|",
+    ]
+    for name, n, exp, _, half in table.head(BEST_SHOWN).iter_rows():
+        lines.append(
+            f"| {md_cell(name)} | {n} | {_pct(exp)} [{_pct(exp - half)} to {_pct(exp + half)}] |"
+        )
+    return [*lines, ""]
+
+
 def chance_section(trades: pl.DataFrame | None, variants: list[dict]) -> list[str]:
     """The luck test: the score's picks against a coin flip and against every token."""
     lines = [
@@ -423,10 +470,24 @@ def spot_check_section(
 def report(run: Path) -> list[str]:
     summary = json.loads((run / "summary.json").read_text())
     variants = json.loads((run / "variants.json").read_text())
-    all_trades, gates = read_table(run, "trades"), read_table(run, "gates")
-    decisions = read_table(run, "decisions")
+    all_trades = read_table(run, "trades")
     stats = summary["stats"]
     headline = headline_variants(variants)
+    # Decisions and gates can be millions of rows (a backtest): scan them and keep only
+    # what the report shows, the spot-check entries and those tokens' gate rows.
+    wanted = [name for _, name in headline]
+    decisions = gates = None
+    gates_lf = scan_table(run, "gates")
+    if (dec_lf := scan_table(run, "decisions")) is not None:
+        decisions = (
+            dec_lf.filter((pl.col("kind") == "fill_buy") & pl.col("variant").is_in(wanted))
+            .sort("ts_ms")
+            .tail(SPOT_CHECKS)
+            .collect()
+        )
+    if gates_lf is not None and decisions is not None:
+        mints = decisions["mint"].unique().to_list()
+        gates = gates_lf.filter(pl.col("mint").is_in(mints)).collect()
     # Shadow variants (labels) are not paper wallets: only "Picks vs chance" shows them.
     shadow = [v["name"] for v in variants if v.get("shadow")]
     trades = all_trades
@@ -436,11 +497,27 @@ def report(run: Path) -> list[str]:
         v["name"]: v["universe"] for v in variants if v.get("conviction") and not v.get("shadow")
     }
     ungated = {n for n, u in conviction_universes.items() if u == "conviction"}
+    backtest = summary["mode"] == "backtest"
+    title = (
+        f"# M3: backtest, run {run.name}" if backtest else f"# M6: paper trading, run {run.name}"
+    )
+    kind = (
+        "Backtest only: simulated fills on historical data (Slinky21), no lookups, no "
+        "transaction was sent."
+        if backtest
+        else "Paper trading only: simulated fills on live data, no transaction was sent."
+    )
+    if summary.get("parts"):
+        kind += (
+            f" Run in {summary['parts']} parts side by side, each starting with fresh 1 SOL "
+            "wallets: Cash, Open and Equity add up the parts' changes, so they are not one "
+            "wallet's balance and can go below zero. Judge variants by expectancy."
+        )
     lines = [
-        f"# M6: paper trading, run {run.name}",
+        title,
         "",
         "Generated by `uv run python -m cryptobot.m6_report`. Do not edit by hand.",
-        "Paper trading only: simulated fills on live data, no transaction was sent.",
+        kind,
         "",
         "## Run",
         "",
@@ -472,8 +549,13 @@ def report(run: Path) -> list[str]:
     ]
     universes = sorted({v["universe"] for v in variants})
     passed: dict[str, int] = {}
-    if gates is not None:
-        counts = gates.filter(pl.col("passed")).group_by("universe").agg(pl.col("mint").n_unique())
+    if gates_lf is not None:
+        counts = (
+            gates_lf.filter(pl.col("passed"))
+            .group_by("universe")
+            .agg(pl.col("mint").n_unique())
+            .collect()
+        )
         passed = dict(counts.iter_rows())
     lines += [f"| {u} | {passed.get(u, 0):,} |" for u in universes]
     lines += [""]
@@ -498,6 +580,7 @@ def report(run: Path) -> list[str]:
         *RESULT_HEADER,
         *result_rows(table, summary, headline),
         "",
+        *best_section(trades),
         *chance_section(all_trades, variants),
         *tier_section(trades, conviction_universes),
         *narrative_section(trades, ungated, Path(summary["source"])),

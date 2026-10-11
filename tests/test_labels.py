@@ -55,3 +55,20 @@ def test_split_table_compares_each_side_of_the_median():
         "| dev_share (median 0.4875) | 20, 100.0% [83.9%-100.0%], 40.0% | "
         "20, 0.0% [0.0%-16.1%], -10.0% |"
     ]
+
+
+def test_best_section_counts_profitable_variants():
+    import polars as pl
+
+    from cryptobot.m6_report import best_section
+
+    rows = [("good", 0.10 + (i % 2) * 0.01) for i in range(40)]
+    rows += [("bad", -0.05 + (i % 2) * 0.2) for i in range(40)]
+    rows += [("tiny", 0.5)] * 5  # too few trades to count
+    trades = pl.DataFrame(rows, schema=["variant", "net_return"], orient="row")
+    text = "\n".join(best_section(trades))
+    assert "- Variants with at least 30 trades: 2" in text
+    assert (
+        "- With a positive mean: 2" in text and "- With the 95% lower bound above zero: 1" in text
+    )
+    assert text.index("| good |") < text.index("| bad |") and "tiny" not in text
