@@ -63,7 +63,7 @@ def test_best_section_counts_profitable_variants():
     from cryptobot.m6_report import best_section
 
     rows = [("good", 0.10 + (i % 2) * 0.01) for i in range(40)]
-    rows += [("bad", -0.05 + (i % 2) * 0.2) for i in range(40)]
+    rows += [("bad", -0.30 + (i % 2) * 0.62) for i in range(40)]  # mean +1%, wide
     rows += [("tiny", 0.5)] * 5  # too few trades to count
     trades = pl.DataFrame(rows, schema=["variant", "net_return"], orient="row")
     text = "\n".join(best_section(trades))
