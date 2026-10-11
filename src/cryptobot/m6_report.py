@@ -242,7 +242,8 @@ def headline_variants(variants: list[dict]) -> list[tuple[str, str]]:
         for v in variants
         if v["kind"] in ("new_pairs", "final_stretch") and v["name"] == f"{v['universe']}|{core}"
     ]
-    return out + [(v["universe"], v["name"]) for v in variants if v.get("conviction")]
+    conv = [v for v in variants if v.get("conviction") and not v.get("shadow")]
+    return out + [(v["universe"], v["name"]) for v in conv]
 
 
 def _outcomes(df: pl.DataFrame, by: list[str]) -> dict[tuple, tuple[int, int, float]]:
@@ -282,8 +283,35 @@ def tier_section(trades: pl.DataFrame | None, conviction_universes: dict[str, st
     lines += ["| Universe | Tier | Trades | Win rate [95% CI] | Expectancy |"]
     lines += ["|---|---|---|---|---|"]
     for u in sorted(set(conviction_universes.values())):
-        for t in TIERS:
+        for t in ("random",) if u == "control_random" else TIERS:
             lines.append(f"| {u} | {t} | {_outcome_cells(found.get((u, t)))} |")
+    return [*lines, ""]
+
+
+def chance_section(trades: pl.DataFrame | None, variants: list[dict]) -> list[str]:
+    """The luck test: the score's picks against a coin flip and against every token."""
+    lines = [
+        "## Picks vs chance",
+        "",
+        "Every conviction-kind universe with V1's exits (+45% target, sell at the first price "
+        "below entry). `control_random` passes the same gates, then a coin flip on the mint "
+        "picks half the tokens, bought on a 25% dip. `labels` (no wallet limit) buys every "
+        "eligible token the moment it qualifies: the base rate. A universe whose picks don't "
+        "beat `control_random` net of costs is not showing skill, only the market's mood.",
+        "",
+    ]
+    names = {
+        v["name"]: v["universe"]
+        for v in variants
+        if v.get("conviction") and v.get("target") == 0.45 and v.get("stop_tolerance") == 0.0
+    }
+    sub = None if trades is None else trades.filter(pl.col("variant").is_in(list(names)))
+    if sub is None or sub.is_empty():
+        return [*lines, "No conviction-kind trades closed in this run.", ""]
+    found = _outcomes(sub, ["universe"])
+    lines += ["| Universe | Trades | Win rate [95% CI] | Expectancy |", "|---|---|---|---|"]
+    for u in sorted(set(names.values())):
+        lines.append(f"| {u} | {_outcome_cells(found.get((u,)))} |")
     return [*lines, ""]
 
 
@@ -395,11 +423,18 @@ def spot_check_section(
 def report(run: Path) -> list[str]:
     summary = json.loads((run / "summary.json").read_text())
     variants = json.loads((run / "variants.json").read_text())
-    trades, gates = read_table(run, "trades"), read_table(run, "gates")
+    all_trades, gates = read_table(run, "trades"), read_table(run, "gates")
     decisions = read_table(run, "decisions")
     stats = summary["stats"]
     headline = headline_variants(variants)
-    conviction_universes = {v["name"]: v["universe"] for v in variants if v.get("conviction")}
+    # Shadow variants (labels) are not paper wallets: only "Picks vs chance" shows them.
+    shadow = [v["name"] for v in variants if v.get("shadow")]
+    trades = all_trades
+    if all_trades is not None and shadow:
+        trades = all_trades.filter(~pl.col("variant").is_in(shadow))
+    conviction_universes = {
+        v["name"]: v["universe"] for v in variants if v.get("conviction") and not v.get("shadow")
+    }
     ungated = {n for n, u in conviction_universes.items() if u == "conviction"}
     lines = [
         f"# M6: paper trading, run {run.name}",
@@ -463,6 +498,7 @@ def report(run: Path) -> list[str]:
         *RESULT_HEADER,
         *result_rows(table, summary, headline),
         "",
+        *chance_section(all_trades, variants),
         *tier_section(trades, conviction_universes),
         *narrative_section(trades, ungated, Path(summary["source"])),
         *spot_check_section(decisions, trades, gates, headline),
@@ -475,8 +511,9 @@ def report(run: Path) -> list[str]:
     if table is None:
         return [*lines, "No paper trades closed in this run.", "", *caveats(0)]
     lines += [*explain, *RESULT_HEADER, *result_rows(table, summary)]
-    idle = len(variants) - table.height
-    lines += ["", f"{idle} of {len(variants)} variants closed no trades.", ""]
+    wallets = len(variants) - len(shadow)
+    idle = wallets - table.height
+    lines += ["", f"{idle} of {wallets} wallet variants closed no trades.", ""]
 
     core = core_name()
     lines += [

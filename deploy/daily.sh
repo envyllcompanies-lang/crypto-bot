@@ -28,6 +28,13 @@ if ! nice -n 10 "$PYTHON" -m cryptobot.creators --days "${CRYPTOBOT_CREATOR_DAYS
   rm -f "$CREATORS_REPORT"
 fi
 
+# Labelled outcomes (every eligible token's features and result) for the adaptive layer.
+LABELS_REPORT="data/reports/$DAY-labels.md"
+if ! nice -n 10 "$PYTHON" -m cryptobot.labels > "$LABELS_REPORT"; then
+  echo "labels: no labelled outcomes yet" >&2
+  rm -f "$LABELS_REPORT"
+fi
+
 REPORT="data/reports/$DAY-paper.md"
 "$PYTHON" -m cryptobot.m6_report > "$REPORT"
 echo "report: $REPORT"
@@ -49,6 +56,7 @@ if [ "${CRYPTOBOT_PUSH_REPORTS:-0}" = "1" ]; then
   cp "$REPORT" "$work/reports/"
   [ -f "$TRACKED_REPORT" ] && cp "$TRACKED_REPORT" "$work/reports/"
   [ -f "$CREATORS_REPORT" ] && cp "$CREATORS_REPORT" "$work/reports/"
+  [ -f "$LABELS_REPORT" ] && cp "$LABELS_REPORT" "$work/reports/"
   git -C "$work" add reports
   if git -C "$work" -c user.name="crypto-bot server" \
       -c user.email="crypto-bot-server@users.noreply.github.com" \

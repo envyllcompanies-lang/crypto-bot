@@ -75,6 +75,10 @@ Final Stretch entries start 40 minutes into a run (see below), so run the paper 
   - below 50: skip.
 
   Some tokens are never traded: tainted data, graduated, older than 40 minutes, clustered top-5 funding, or no lookup yet. The "conviction" universe takes New Pairs-sized tokens ($7K or more, up to 40 minutes old, 0.25 SOL stakes) and runs every target and stop above at a 2-second delay. The weights are first guesses to tune on paper results.
+- **Luck test and labels** (the start of the adaptive layer).
+  - `control_random` passes the same gates as conviction, then a fixed coin flip on each mint picks half the tokens, bought on a 25% dip. If conviction's picks don't beat it, the score shows no skill.
+  - `labels` is a shadow variant, not a wallet: it buys every eligible token the moment it qualifies, so each one gets a measured outcome. A nightly job (`labels.py`) joins those outcomes to each token's features at decision time, as training data for a learned scorer.
+  - The report's "Picks vs chance" table compares conviction, the narrative gate, the control and the base rate with the same exits.
 - **Fills.** The M2 fill model:
   - An order lands after the delay, behind every trade that arrived first.
   - It fills on the curve those trades left, with our own price impact.

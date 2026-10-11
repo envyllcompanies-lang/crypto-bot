@@ -6,6 +6,9 @@ files (such as the cached chain check) live in `data/derived/`. The tracked-wall
 rebuilt nightly by `uv run python -m cryptobot.tracked` from recent recordings.
 Creator records (launches and graduates per creator) are `data/derived/creators.parquet`,
 rebuilt nightly by `uv run python -m cryptobot.creators` from the last 14 days.
+Labelled outcomes (each eligible token's features at decision time and its result) are
+`data/derived/labels.parquet`, rebuilt nightly by `uv run python -m cryptobot.labels`
+from every paper run.
 You never need to fetch by hand: analysis code calls `cryptobot.fetch.ensure`, which
 downloads any missing file from Hugging Face on first use (free, no account) and
 reuses it after that. Nothing here is uploaded to GitHub. Fetch with

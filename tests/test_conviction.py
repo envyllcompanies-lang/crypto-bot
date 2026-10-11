@@ -299,8 +299,12 @@ def test_report_shows_v1_as_stated_tiers_and_spot_checks(tmp_path):
 
     run = tmp_path / "run"
     run.mkdir()
+    from cryptobot.v1 import control_universe, labels_universe
+
     conv = conviction_variant(conviction_universe(), target=0.45, stop=0.0)
-    variants = [variant(u, *CORE) for u in universes()[:2]] + [conv]
+    control = conviction_variant(control_universe(), target=0.45, stop=0.0)
+    labels = conviction_variant(labels_universe(), 0.45, 0.0, shadow=True)
+    variants = [variant(u, *CORE) for u in universes()[:2]] + [conv, control, labels]
     (run / "variants.json").write_text(json.dumps([v.describe() for v in variants]))
     eng = Engine(variants, out=Sink(run, OUT_SCHEMAS))
     eng.summary_path = run / "summary.json"
@@ -314,10 +318,15 @@ def test_report_shows_v1_as_stated_tiers_and_spot_checks(tmp_path):
     assert "| conviction | tp45\\|sl0\\|d2s | 1 |" in text
     assert "| conviction | good | 1 |" in text
     assert "| conviction | very_high | 0 | n/a | n/a |" in text
+    chance = text[text.index("## Picks vs chance") : text.index("## Conviction by tier")]
+    assert "| conviction | 1 |" in chance and "| control_random | 1 |" in chance
+    assert "| labels | 1 |" in chance
+    assert "labels|" not in text[: text.index("## Picks vs chance")]  # not a wallet
+    assert "| control_random | random | 1 |" in text
     narrative = text[text.index("## Conviction by narrative score") :]
     assert "| 5 | 1 | 0.0%" in narrative and "| 1 | 0 | n/a | n/a |" in narrative
     spot = text[text.index("## Spot-check list") :]
-    row = next(line for line in spot.splitlines() if "`Mint1111`" in line)
+    row = next(ln for ln in spot.splitlines() if "| conviction\\|tp45" in ln)
     assert "| `Evil \\| [click](https://x.example) **coin` (`EVL\\|`) |" in row
     assert "community `https://x.com/i/communities/9`" in row
     assert "| 71 good | 5/5 `t` |" in row
@@ -402,3 +411,44 @@ def test_gated_universe_enters_by_the_narrative_cap(tmp_path):
     assert gated_signals(tmp_path / "3", 3) == [(6_000, "conviction 71 average")]
     assert gated_signals(tmp_path / "1", 1) == []
     assert gated_signals(tmp_path / "none", None) == []  # no verdict: waits, never buys
+
+
+def test_control_flips_a_fixed_coin_per_mint():
+    from cryptobot.conviction import control_pick
+
+    conv = conviction(clean_token(), CLEAN, 4_000, NOW)
+    picked, dropped = control_pick(conv, "Mint1111"), control_pick(conv, "Mint2222")
+    assert (picked.tier, picked.drop, picked.score) == ("random", 0.25, BASE)
+    assert (dropped.tier, dropped.drop) == ("skip", None)
+
+
+def universe_signals(tmp_path, variant):
+    eng = Engine([variant], out=Sink(tmp_path, OUT_SCHEMAS))
+    eng.holder_checks = True
+    eng.request_lookup = lambda *args: None
+    feed(eng, dump_tape(), CLEAN)
+    eng.finish()
+    eng.flush()
+    buys = read_table(tmp_path, "decisions").filter(kind="signal_buy")
+    return list(zip(buys["ts_ms"].to_list(), buys["reason"].to_list(), strict=True)), eng
+
+
+def test_control_enters_its_picks_on_a_25pct_dip(tmp_path):
+    from cryptobot.v1 import control_universe
+
+    var = conviction_variant(control_universe(), target=0.45, stop=0.0, delay_ms=500)
+    signals, _ = universe_signals(tmp_path, var)
+    assert signals == [(6_000, "conviction 71 random")]
+
+
+def test_labels_enter_every_eligible_token_at_once_without_a_wallet(tmp_path):
+    from cryptobot.v1 import labels_universe
+
+    var = conviction_variant(labels_universe(), 0.45, 0.0, delay_ms=500, shadow=True)
+    signals, eng = universe_signals(tmp_path, var)
+    # The first trade after the lookup arrives (4.5 s); the score was 63 then, a skip
+    # for conviction, but labels take every eligible token.
+    assert len(signals) == 1 and signals[0][0] > LOOKUP_MS
+    assert signals[0][1].startswith("conviction ") and signals[0][1].endswith(" label")
+    assert len(eng.results) == 1
+    assert eng.balance[0] == Engine([var]).balance[0]  # shadow: the wallet never moves

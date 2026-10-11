@@ -71,6 +71,8 @@ class Universe:
     stake_lamports: int
     cutoff: float = 0.0  # Final Stretch only: minimum curve progress
     narrative_gate: bool = False  # conviction only: LLM narrative score caps the tier
+    control: bool = False  # conviction only: a coin flip picks tokens, not the score
+    labels: bool = False  # conviction only: every eligible token, entered at once
 
 
 ALL = Universe("all", "all", NEW_PAIRS_STAKE)
@@ -90,6 +92,14 @@ def conviction_universe(max_stake: int = MAX_STAKE, narrative_gate: bool = False
     name = "conviction_narrative" if narrative_gate else "conviction"
     stake = min(NEW_PAIRS_STAKE, max_stake)
     return Universe(name, "conviction", stake, narrative_gate=narrative_gate)
+
+
+def control_universe(max_stake: int = MAX_STAKE) -> Universe:
+    return Universe("control_random", "conviction", min(NEW_PAIRS_STAKE, max_stake), control=True)
+
+
+def labels_universe(max_stake: int = MAX_STAKE) -> Universe:
+    return Universe("labels", "conviction", min(NEW_PAIRS_STAKE, max_stake), labels=True)
 
 
 def check(
@@ -159,6 +169,7 @@ class Variant:
     fill: FillConfig
     holder_sell: bool = False  # also exit when the largest holder at entry sells
     conviction: bool = False  # entry drop comes from the token's conviction tier
+    shadow: bool = False  # no wallet limit: records outcomes, is not a paper wallet
 
     def __post_init__(self) -> None:
         stake = getattr(self.strategy, "stake_lamports", 0)
@@ -173,6 +184,9 @@ class Variant:
             "kind": self.universe.kind,
             "cutoff": self.universe.cutoff,
             "narrative_gate": self.universe.narrative_gate,
+            "control": self.universe.control,
+            "labels": self.universe.labels,
+            "shadow": self.shadow,
             "stake_lamports": getattr(s, "stake_lamports", None),
             "drop": "conviction tier" if self.conviction else getattr(s, "drop", None),
             "target": getattr(s, "target", None),
@@ -220,7 +234,7 @@ def variant(
 
 
 def conviction_variant(
-    u: Universe, target: float, stop: float, delay_ms: int = DEFAULT_DELAY_MS
+    u: Universe, target: float, stop: float, delay_ms: int = DEFAULT_DELAY_MS, shadow=False
 ) -> Variant:
     """Entry drop from the conviction tier at decision time; V1's exits."""
     name = f"{u.name}|tp{round(target * 100)}|sl{round(stop * 100)}|d{delay_ms // 1000}s"
@@ -234,14 +248,16 @@ def conviction_variant(
         max_age_ms=None,
         quiet_ms=QUIET_MS,
     )
-    return Variant(name, u, strategy, FillConfig(delay_ms=delay_ms), conviction=True)
+    fill = FillConfig(delay_ms=delay_ms)
+    return Variant(name, u, strategy, fill, conviction=True, shadow=shadow)
 
 
 def default_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
     """The grid run side by side, for New Pairs and each Final Stretch cut-off: every
     entry x target x stop at a 2 s delay, plus V1's core rule at 1 s and 5 s delays,
     with a 10-minute stall, and with the largest-holder-sells exit. Then the conviction
-    universe, ungated and narrative-gated, with every target x stop at a 2 s delay."""
+    universe (ungated, narrative-gated, and the random control) with every target x stop
+    at a 2 s delay, and one shadow labels variant with V1's exits."""
     if max_stake > HARD_MAX_STAKE:
         raise ValueError("max_stake is above the 1.5 SOL hard cap")
     out = []
@@ -253,7 +269,11 @@ def default_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
         out += [variant(u, *CORE, delay_ms=d) for d in DELAYS_MS if d != DEFAULT_DELAY_MS]
         out.append(variant(u, *CORE, stall_ms=STALL_MS))
         out.append(variant(u, *CORE, holder_sell=True))
-    for gate in (False, True):
-        conv = conviction_universe(max_stake, narrative_gate=gate)
-        out += [conviction_variant(conv, t, s) for t in TARGETS for s in STOP_TOLERANCES]
+    for u in (
+        conviction_universe(max_stake),
+        conviction_universe(max_stake, narrative_gate=True),
+        control_universe(max_stake),
+    ):
+        out += [conviction_variant(u, t, s) for t in TARGETS for s in STOP_TOLERANCES]
+    out.append(conviction_variant(labels_universe(max_stake), *CORE[1:], shadow=True))
     return out

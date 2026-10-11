@@ -59,7 +59,14 @@ from pathlib import Path
 
 import polars as pl
 
-from cryptobot.conviction import Conviction, blocks, conviction, narrative_gate
+from cryptobot.conviction import (
+    Conviction,
+    blocks,
+    control_pick,
+    conviction,
+    label_entry,
+    narrative_gate,
+)
 from cryptobot.costs import Venue
 from cryptobot.creators import CREATORS_PATH, RECENT_LAUNCH_MS
 from cryptobot.creators import load as load_creators
@@ -243,7 +250,8 @@ class Engine:
         self.lookups: dict[str, dict] = {}
         self.results_by_mint: dict[str, dict] = {}  # parsed result of each good lookup
         self.convictions: dict[str, Conviction | None] = {}
-        self.gated_convictions: dict[str, Conviction | None] = {}  # narrative-gated universe
+        # Other conviction-kind universes (narrative-gated, control, labels): name -> mint ->
+        self.other_convictions: dict[str, dict[str, Conviction | None]] = {}
         self.requested: set[str] = set()
         # Tracked-wallet list (tracked.py); None until one is loaded.
         self.tracked: frozenset[str] | None = None
@@ -446,13 +454,17 @@ class Engine:
             row = self.lookups.get(tok.mint)
             lookup_ms = None if row is None or result is None else row["received_ms"]
             conv = conviction(tok, result, lookup_ms, ts)
-            if u.narrative_gate:
-                if conv is not None:
-                    assert result is not None
-                    conv = narrative_gate(conv, result)
-                self.gated_convictions[tok.mint] = conv
-            else:
+            if conv is not None and u.narrative_gate:
+                assert result is not None
+                conv = narrative_gate(conv, result)
+            elif conv is not None and u.control:
+                conv = control_pick(conv, tok.mint)
+            elif conv is not None and u.labels:
+                conv = label_entry(conv)
+            if u.name == "conviction":
                 self.convictions[tok.mint] = conv
+            else:
+                self.other_convictions.setdefault(u.name, {})[tok.mint] = conv
             checks["conviction_tradeable"] = conv is not None and conv.drop is not None
         ok = passes(checks)
         key = (tok.mint, u.name)
@@ -490,7 +502,10 @@ class Engine:
             if not gate_ok or slot.entries >= var.fill.max_trades_per_token:
                 return
             strategy = var.strategy
-            store = self.gated_convictions if var.universe.narrative_gate else self.convictions
+            name = var.universe.name
+            store = (
+                self.convictions if name == "conviction" else self.other_convictions.get(name, {})
+            )
             conv = store.get(tok.mint) if var.conviction else None
             if var.conviction:
                 if conv is None or conv.drop is None:
@@ -504,12 +519,13 @@ class Engine:
             if action.stake_lamports > HARD_MAX_STAKE:
                 raise ValueError(f"{var.name}: stake above the 1.5 SOL hard cap")
             need = action.stake_lamports + var.fill.network_lamports_per_tx + var.fill.rent_lamports
-            if not self.unlimited:
+            unlimited = self.unlimited or var.shadow
+            if not unlimited:
                 if self.balance[vi] < need:
                     self._decision(ts, vi, tok.mint, "skip_balance", action.reason, curve.price())
                     return
                 self.balance[vi] -= need
-            reserved = 0 if self.unlimited else need
+            reserved = 0 if unlimited else need
             self._schedule(vi, tok.mint, slot, action, ts, var.fill.delay_ms, reserved)
             self._decision(ts, vi, tok.mint, "signal_buy", action.reason, curve.price())
             return
@@ -619,7 +635,7 @@ class Engine:
             p.land_ts_ms, tokens, cost, spent / tokens, p.decided_ts_ms, order.reason
         )
         slot.entries += 1
-        if not self.unlimited:
+        if not (self.unlimited or var.shadow):
             self.balance[vi] += p.reserved - cost
         slot.watch = tok.largest_holder()[0]
         self._decision(p.land_ts_ms, vi, tok.mint, "fill_buy", order.reason, spent / tokens)
@@ -653,7 +669,7 @@ class Engine:
             flags=flags + tuple(sorted(slot.flags - set(flags))),
         )
         self.results.append((vi, tok.mint, result))
-        if not self.unlimited:
+        if not (self.unlimited or var.shadow):
             self.balance[vi] += proceeds
         slot.position = None
         slot.flags.clear()
@@ -734,7 +750,8 @@ class Engine:
         self.lookups.pop(mint, None)
         self.results_by_mint.pop(mint, None)
         self.convictions.pop(mint, None)
-        self.gated_convictions.pop(mint, None)
+        for store in self.other_convictions.values():
+            store.pop(mint, None)
         self.requested.discard(mint)
         for u in self.universes:
             self.gates.pop((mint, u.name), None)

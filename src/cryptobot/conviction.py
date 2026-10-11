@@ -46,6 +46,7 @@ whole number, the one logs and reports show.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field, replace
 
 from cryptobot.features import TokenState
@@ -187,3 +188,26 @@ def narrative_gate(conv: Conviction, result: dict) -> Conviction:
     if conv.tier == SKIP or _RANK[cap] >= _RANK[conv.tier]:
         return replace(conv, narrative_cap=cap)
     return replace(conv, tier=cap, drop=_DROPS.get(cap), narrative_cap=cap)
+
+
+# Random control: the same gates as conviction, then a fixed coin flip per mint instead of
+# the score, entering on the "good" tier's dip. If conviction's picks don't beat these,
+# the score has no skill. The flip hashes the mint, so replays pick the same tokens.
+CONTROL_DROP = 0.25
+RANDOM, LABEL = "random", "label"
+
+
+def coin_flip(mint: str) -> bool:
+    return hashlib.sha256(mint.encode()).digest()[0] % 2 == 0
+
+
+def control_pick(conv: Conviction, mint: str) -> Conviction:
+    if coin_flip(mint):
+        return replace(conv, tier=RANDOM, drop=CONTROL_DROP)
+    return replace(conv, tier=SKIP, drop=None)
+
+
+def label_entry(conv: Conviction) -> Conviction:
+    """Labels: enter every eligible token at once, whatever its score, so each one gets a
+    measured outcome next to its features (the learned scorer's training data)."""
+    return replace(conv, tier=LABEL, drop=0.0)
