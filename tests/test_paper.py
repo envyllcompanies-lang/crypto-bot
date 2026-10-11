@@ -297,3 +297,47 @@ def test_final_stretch_waits_for_a_complete_column(tmp_path):
     eng.finish()
     first = json.loads(read_table(tmp_path, "gates")["checks"][0])
     assert first["column_complete"] is False
+
+
+def test_summary_is_rewritten_on_flush(tmp_path):
+    import json
+
+    eng = Engine([Variant("v", ALL, STRATEGIES["v1_core"], FillConfig())], unlimited_balance=True)
+    eng.summary_path = tmp_path / "summary.json"
+    eng.summary_extra = {"mode": "live", "running": True}
+    eng.on_create(create_row())
+    rows = bounce_tape().rows
+    for row in rows:
+        eng.on_trade(row)
+    eng.flush()
+    data = json.loads(eng.summary_path.read_text())
+    assert data["running"] is True
+    assert data["stats"]["trades_on_tracked_tokens"] == len(rows)
+
+
+def test_report_renders_a_replayed_run(tmp_path):
+    import json
+
+    from cryptobot.m6_report import lag_by_hour, report
+
+    events = tmp_path / "events"
+    sink = Sink(events)
+    sink.add("create", [create_row()])
+    rows = [dict(r, timestamp=r["received_ms"] // 1000 - 1) for r in bounce_tape().rows]
+    sink.add("trade", rows)
+    sink.flush()
+    lag = lag_by_hour(events)
+    assert lag["trades"].sum() == len(rows) and lag["median"][0] == 1.0
+
+    run = tmp_path / "run"
+    run.mkdir()
+    var = Variant("v", ALL, STRATEGIES["v1_core"], FillConfig(delay_ms=1_000))
+    (run / "variants.json").write_text(json.dumps([var.describe()]))
+    eng = Engine([var], out=Sink(run, OUT_SCHEMAS), unlimited_balance=True)
+    eng.summary_path = run / "summary.json"
+    eng.summary_extra = {"mode": "replay", "source": str(events), "running": False}
+    run_replay(eng, events)
+    text = "\n".join(report(run))
+    assert "| Status | finished |" in text
+    assert "## Feed lag" in text and "| 1.00 s |" in text
+    assert "| all | v | 1 | 100.0%" in text

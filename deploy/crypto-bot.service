@@ -1,0 +1,19 @@
+[Unit]
+Description=crypto-bot paper trader (simulated fills; never sends a transaction)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=@USER@
+WorkingDirectory=@DIR@
+EnvironmentFile=-@DIR@/.env
+# SIGINT lets the trader finish cleanly: orders in flight land, open positions are
+# valued and the run's summary is written. A restart starts a new run.
+ExecStart=@DIR@/.venv/bin/python -m cryptobot.paper live
+KillSignal=SIGINT
+TimeoutStopSec=60
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

@@ -19,6 +19,7 @@ from cryptobot.features import BUNDLE_CANDLE_MULT, PRO_MIN_BUY_LAMPORTS
 from cryptobot.paper import PAPER, read_table
 from cryptobot.v1 import CORE, NOT_EVALUATED, V1_LAUNCH_USD
 
+LAG_HOURS_SHOWN = 48
 MIN_TRADES = 30  # below this many closed trades a variant's numbers are anecdotes
 NETWORK_LEVELS_SOL = (0.0, 0.0001, 0.0005, 0.001)  # priority fee + tip per transaction
 Z95 = 1.959964
@@ -49,6 +50,48 @@ def _ts(ms: int | None) -> str:
     if ms is None:
         return "n/a"
     return datetime.fromtimestamp(ms / 1000, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def lag_by_hour(events: Path) -> pl.DataFrame | None:
+    """Seconds from each trade's block time to when we received it, per UTC hour."""
+    files = sorted((events / "trade").glob("*/*.parquet"))
+    if not files:
+        return None
+    lag = (pl.col("received_ms") - pl.col("timestamp") * 1000) / 1000
+    return (
+        pl.scan_parquet(files)
+        .select(hour=pl.col("received_ms") // 3_600_000 * 3_600_000, lag=lag)
+        .group_by("hour")
+        .agg(
+            trades=pl.len(),
+            median=pl.col("lag").median(),
+            p90=pl.col("lag").quantile(0.9),
+            worst=pl.col("lag").max(),
+        )
+        .sort("hour")
+        .collect()
+    )
+
+
+def lag_section(events: Path) -> list[str]:
+    lines = [
+        "## Feed lag",
+        "",
+        "Seconds from each trade's block time to when we received it. Block times are whole "
+        "seconds, so each value is rough to about 1 second.",
+        "",
+    ]
+    table = lag_by_hour(events) if events.exists() else None
+    if table is None or table.is_empty():
+        return [*lines, "No recorded events for this run.", ""]
+    shown = table.tail(LAG_HOURS_SHOWN)
+    if shown.height < table.height:
+        lines += [f"Last {shown.height} of {table.height} hours shown.", ""]
+    lines += ["| Hour (UTC) | Trades | Median | 90th percentile | Worst |", "|---|---|---|---|---|"]
+    for hour, n, median, p90, worst in shown.iter_rows():
+        start = datetime.fromtimestamp(hour / 1000, UTC).strftime("%Y-%m-%d %H:00")
+        lines.append(f"| {start} | {n:,} | {median:.2f} s | {p90:.2f} s | {worst:.2f} s |")
+    return [*lines, ""]
 
 
 def core_name() -> str:
@@ -89,6 +132,7 @@ def report(run: Path) -> list[str]:
         "| | |",
         "|---|---|",
         f"| Mode | {summary['mode']} |",
+        f"| Status | {'still running' if summary.get('running') else 'finished'} |",
         f"| Source | {'/'.join(Path(summary['source']).parts[-3:])} |",
         f"| From | {_ts(summary['first_event_ms'])} |",
         f"| To | {_ts(summary['last_event_ms'])} |",
@@ -114,8 +158,9 @@ def report(run: Path) -> list[str]:
         counts = gates.filter(pl.col("passed")).group_by("universe").agg(pl.col("mint").n_unique())
         passed = dict(counts.iter_rows())
     lines += [f"| {u} | {passed.get(u, 0):,} |" for u in universes]
+    lines += ["", *lag_section(Path(summary["source"]))]
 
-    lines += ["", "## Results by variant", ""]
+    lines += ["## Results by variant", ""]
     if trades is None or trades.is_empty():
         return [*lines, "No paper trades closed in this run.", "", *caveats(0)]
     table = variant_table(trades)
@@ -167,7 +212,8 @@ def caveats(n_trades: int) -> list[str]:
         "## Read this before the numbers",
         "",
         f"- {n_trades:,} closed paper trades in total, spread over many variants. Treat any "
-        f"variant with fewer than {MIN_TRADES} trades as an anecdote.",
+        f"variant with fewer than {MIN_TRADES} trades as an anecdote. Positions still open in "
+        "a running session are not counted until they close.",
         "- Fills are simulated: our orders land after the delay on the curve other traders "
         "left, with our own price impact, but nobody reacts to our trades.",
         "- V1 checks not evaluated (they need extra RPC calls or metadata): "

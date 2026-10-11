@@ -119,7 +119,10 @@ class Sink:
                 continue
             path = self.root / table / f"{stamp:%Y-%m-%d}" / f"{stamp:%H%M%S%f}.parquet"
             path.parent.mkdir(parents=True, exist_ok=True)
-            pl.DataFrame(rows, schema=self.schemas[table], strict=False).write_parquet(path)
+            # Write then rename, so a reader never sees a half-written file.
+            tmp = path.with_name(path.name + ".tmp")
+            pl.DataFrame(rows, schema=self.schemas[table], strict=False).write_parquet(tmp)
+            os.replace(tmp, path)
             written.append(path)
             self.rows[table] = []
         return written

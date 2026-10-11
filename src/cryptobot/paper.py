@@ -167,6 +167,9 @@ class Engine:
         self.first_ts: int | None = None
         self.clock = 0
         self.last_flush: int | None = None
+        # Rewritten on every flush, so a report can read a run that is still going.
+        self.summary_path: Path | None = None
+        self.summary_extra: dict = {}
 
     # Events -----------------------------------------------------------------
 
@@ -519,6 +522,14 @@ class Engine:
             self._drop(mint)
         if self.out is not None:
             self.out.flush()
+        self.write_summary()
+
+    def write_summary(self) -> None:
+        if self.summary_path is None:
+            return
+        tmp = self.summary_path.with_name(self.summary_path.name + ".tmp")
+        tmp.write_text(json.dumps({**self.summary_extra, **self.summary()}, indent=1))
+        os.replace(tmp, self.summary_path)
 
     def summary(self) -> dict:
         return {
@@ -624,14 +635,15 @@ def main(argv: list[str] | None = None) -> None:
     run_dir.mkdir(parents=True)
     (run_dir / "variants.json").write_text(json.dumps([v.describe() for v in variants], indent=1))
     engine = Engine(variants, Sink(run_dir, OUT_SCHEMAS))
+    source = run_dir / "events" if args.mode == "live" else args.events
+    engine.summary_path = run_dir / "summary.json"
+    engine.summary_extra = {"mode": args.mode, "source": str(source), "running": True}
     if args.mode == "live":
-        run_live(engine, args.minutes, run_dir / "events")
-        source = str(run_dir / "events")
+        run_live(engine, args.minutes, source)
     else:
-        run_replay(engine, args.events)
-        source = str(args.events)
-    summary = {"mode": args.mode, "source": source, **engine.summary()}
-    (run_dir / "summary.json").write_text(json.dumps(summary, indent=1))
+        run_replay(engine, source)
+    engine.summary_extra["running"] = False
+    engine.write_summary()
     pnl = sum(r.pnl_lamports for _, _, r in engine.results)
     print(f"{run_dir}: {len(engine.results)} closed paper trades, {to_sol(pnl):+.4f} SOL in total")
 

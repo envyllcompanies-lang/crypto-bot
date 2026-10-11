@@ -1,0 +1,9 @@
+[Unit]
+Description=crypto-bot daily paper report, raw-event cleanup and optional push
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@DIR@
+EnvironmentFile=-@DIR@/.env
+ExecStart=/bin/bash @DIR@/deploy/daily.sh
