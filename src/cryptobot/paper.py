@@ -59,7 +59,7 @@ from pathlib import Path
 
 import polars as pl
 
-from cryptobot.conviction import Conviction, blocks, conviction
+from cryptobot.conviction import Conviction, blocks, conviction, narrative_gate
 from cryptobot.costs import Venue
 from cryptobot.creators import CREATORS_PATH, RECENT_LAUNCH_MS
 from cryptobot.creators import load as load_creators
@@ -243,6 +243,7 @@ class Engine:
         self.lookups: dict[str, dict] = {}
         self.results_by_mint: dict[str, dict] = {}  # parsed result of each good lookup
         self.convictions: dict[str, Conviction | None] = {}
+        self.gated_convictions: dict[str, Conviction | None] = {}  # narrative-gated universe
         self.requested: set[str] = set()
         # Tracked-wallet list (tracked.py); None until one is loaded.
         self.tracked: frozenset[str] | None = None
@@ -385,6 +386,7 @@ class Engine:
             known = self.results_by_mint.get(row["mint"])
             if known is not None:
                 known.update({k: v for k, v in result.items() if k != "narrative_update"})
+                known["narrative_done"] = True
             return
         self.stats["lookups_done" if row["error"] is None else "lookup_errors"] += 1
         if row["mint"] in self.tokens:
@@ -443,7 +445,14 @@ class Engine:
         if u.kind == "conviction":
             row = self.lookups.get(tok.mint)
             lookup_ms = None if row is None or result is None else row["received_ms"]
-            conv = self.convictions[tok.mint] = conviction(tok, result, lookup_ms, ts)
+            conv = conviction(tok, result, lookup_ms, ts)
+            if u.narrative_gate:
+                if conv is not None:
+                    assert result is not None
+                    conv = narrative_gate(conv, result)
+                self.gated_convictions[tok.mint] = conv
+            else:
+                self.convictions[tok.mint] = conv
             checks["conviction_tradeable"] = conv is not None and conv.drop is not None
         ok = passes(checks)
         key = (tok.mint, u.name)
@@ -481,7 +490,8 @@ class Engine:
             if not gate_ok or slot.entries >= var.fill.max_trades_per_token:
                 return
             strategy = var.strategy
-            conv = self.convictions.get(tok.mint) if var.conviction else None
+            store = self.gated_convictions if var.universe.narrative_gate else self.convictions
+            conv = store.get(tok.mint) if var.conviction else None
             if var.conviction:
                 if conv is None or conv.drop is None:
                     return
@@ -724,6 +734,7 @@ class Engine:
         self.lookups.pop(mint, None)
         self.results_by_mint.pop(mint, None)
         self.convictions.pop(mint, None)
+        self.gated_convictions.pop(mint, None)
         self.requested.discard(mint)
         for u in self.universes:
             self.gates.pop((mint, u.name), None)

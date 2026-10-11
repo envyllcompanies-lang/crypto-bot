@@ -46,7 +46,7 @@ whole number, the one logs and reports show.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from cryptobot.features import TokenState
 from cryptobot.holders import balances_alike, funding_clustered
@@ -68,6 +68,16 @@ RED_FLAG_PENALTY = 10
 # (minimum score, tier, drop from the all-time high to buy at), best first.
 TIERS = ((80, "very_high", 0.0), (65, "good", 0.25), (50, "average", 0.40))
 SKIP = "skip"
+WAITING = "waiting_narrative"  # narrative-gated universe: no verdict yet, so no entry
+
+# Narrative gate (the owner's rule, run beside the ungated universe to test it): the
+# highest tier each LLM narrative score allows. 1-2 never buy, 3 at most average, 4 at
+# most good, only 5 can be very high. A verdict that came back empty (judge error or
+# quota spent) allows at most average.
+NARRATIVE_CAPS = {1: SKIP, 2: SKIP, 3: "average", 4: "good", 5: "very_high"}
+NOT_JUDGED_CAP = "average"
+_RANK = {SKIP: 0, "average": 1, "good": 2, "very_high": 3}
+_DROPS = {name: drop for _, name, drop in TIERS}
 
 
 @dataclass(frozen=True)
@@ -78,6 +88,7 @@ class Conviction:
     reasons: dict[str, float] = field(default_factory=dict)  # points per component
     red_flags: tuple[str, ...] = ()
     shadow: dict = field(default_factory=dict)  # logged, never scored (the LLM narrative)
+    narrative_cap: str | None = None  # narrative-gated universe only: the tier cap applied
 
     def describe(self) -> dict:
         return {
@@ -87,6 +98,7 @@ class Conviction:
             "reasons": self.reasons,
             "red_flags": list(self.red_flags),
             "shadow": self.shadow,
+            "narrative_cap": self.narrative_cap,
         }
 
 
@@ -159,3 +171,19 @@ def conviction(
             tier, drop = name, tier_drop
             break
     return Conviction(score, tier, drop, reasons, tuple(sorted(flags)), shadow)
+
+
+def narrative_gate(conv: Conviction, result: dict) -> Conviction:
+    """The conviction with its tier capped by the LLM narrative score (NARRATIVE_CAPS).
+
+    The score stays as it is; only the tier and its entry drop change. Until the verdict
+    arrives the token waits (tier WAITING, no entry).
+    """
+    if not result.get("narrative_done"):
+        return replace(conv, tier=WAITING, drop=None, narrative_cap=WAITING)
+    narrative = result.get("narrative")
+    score = narrative.get("score") if narrative else None
+    cap = NARRATIVE_CAPS.get(score, SKIP) if score is not None else NOT_JUDGED_CAP
+    if conv.tier == SKIP or _RANK[cap] >= _RANK[conv.tier]:
+        return replace(conv, narrative_cap=cap)
+    return replace(conv, tier=cap, drop=_DROPS.get(cap), narrative_cap=cap)

@@ -134,7 +134,7 @@ def lookup_section(events: Path) -> list[str]:
         "## Lookup delay",
         "",
         "Seconds from requesting a token's checks to the answer. Entries wait for the holder "
-        "lookup only; the narrative verdict is logged later and gates nothing.",
+        "lookup, except in `conviction_narrative`, which also waits for the narrative verdict.",
         "",
     ]
     table = lookup_delays(events)
@@ -245,34 +245,81 @@ def headline_variants(variants: list[dict]) -> list[tuple[str, str]]:
     return out + [(v["universe"], v["name"]) for v in variants if v.get("conviction")]
 
 
-def tier_section(trades: pl.DataFrame | None, conviction_names: set[str]) -> list[str]:
+def _outcomes(df: pl.DataFrame, by: list[str]) -> dict[tuple, tuple[int, int, float]]:
+    table = df.group_by(by).agg(
+        n=pl.len(), wins=(pl.col("pnl_lamports") > 0).sum(), exp=pl.col("net_return").mean()
+    )
+    return {tuple(r[:-3]): tuple(r[-3:]) for r in table.iter_rows()}
+
+
+def _outcome_cells(found: tuple[int, int, float] | None) -> str:
+    if found is None:
+        return "0 | n/a | n/a"
+    n, wins, exp = found
+    lo, hi = wilson(wins, n)
+    return f"{n} | {_pct(wins / n)} [{_pct(lo)}-{_pct(hi)}] | {_pct(exp)}"
+
+
+def tier_section(trades: pl.DataFrame | None, conviction_universes: dict[str, str]) -> list[str]:
+    """`conviction_universes` maps each conviction variant's name to its universe."""
     lines = [
         "## Conviction by tier",
         "",
-        "Closed trades of the conviction variants, by the tier the token had when the entry "
-        "was decided. Win rate with a 95% Wilson interval; expectancy is the mean net return.",
+        "Closed trades of the conviction variants, by universe and by the tier the token had "
+        "when the entry was decided. `conviction_narrative` caps each tier by the LLM "
+        "narrative score; `conviction` ignores it. Win rate with a 95% Wilson interval; "
+        "expectancy is the mean net return.",
         "",
     ]
     sub = None
-    if trades is not None and conviction_names:
-        sub = trades.filter(pl.col("variant").is_in(list(conviction_names)))
+    if trades is not None and conviction_universes:
+        sub = trades.filter(pl.col("variant").is_in(list(conviction_universes)))
     if sub is None or sub.is_empty():
         return [*lines, "No conviction trades closed in this run.", ""]
     tier = pl.col("entry_reason").str.extract(r"^conviction \d+ (\w+)$")
-    table = (
-        sub.with_columns(tier=tier)
-        .group_by("tier")
-        .agg(n=pl.len(), wins=(pl.col("pnl_lamports") > 0).sum(), exp=pl.col("net_return").mean())
-    )
-    found = {t: (n, w, e) for t, n, w, e in table.iter_rows()}
-    lines += ["| Tier | Trades | Win rate [95% CI] | Expectancy |", "|---|---|---|---|"]
-    for t in TIERS:
-        if t not in found:
-            lines.append(f"| {t} | 0 | n/a | n/a |")
-            continue
-        n, wins, exp = found[t]
-        lo, hi = wilson(wins, n)
-        lines.append(f"| {t} | {n} | {_pct(wins / n)} [{_pct(lo)}-{_pct(hi)}] | {_pct(exp)} |")
+    universe = pl.col("variant").replace_strict(conviction_universes, default=None)
+    found = _outcomes(sub.with_columns(tier=tier, universe=universe), ["universe", "tier"])
+    lines += ["| Universe | Tier | Trades | Win rate [95% CI] | Expectancy |"]
+    lines += ["|---|---|---|---|---|"]
+    for u in sorted(set(conviction_universes.values())):
+        for t in TIERS:
+            lines.append(f"| {u} | {t} | {_outcome_cells(found.get((u, t)))} |")
+    return [*lines, ""]
+
+
+def narrative_scores(events: Path) -> pl.DataFrame | None:
+    """mint -> the LLM narrative score from the run's lookups (last verdict per mint)."""
+    table = read_table(events, "lookups") if events.exists() else None
+    if table is None:
+        return None
+    verdicts = table.filter(pl.col("result").fill_null("").str.contains('"narrative_update": true'))
+    if verdicts.is_empty():
+        return None
+    score = pl.col("result").str.json_path_match("$.narrative.score").cast(pl.Int64, strict=False)
+    return verdicts.sort("received_ms").select("mint", narrative=score).unique("mint", keep="last")
+
+
+def narrative_section(trades: pl.DataFrame | None, ungated: set[str], events: Path) -> list[str]:
+    """Does the LLM narrative score predict outcomes? Ungated conviction trades only, so
+    the score did not choose the trades it is judged on."""
+    lines = [
+        "## Conviction by narrative score",
+        "",
+        "Closed trades of the ungated `conviction` variants, by the LLM narrative score its "
+        "token got (1-5; none = not judged). If higher scores don't win more here, the "
+        "narrative gate isn't earning its delay.",
+        "",
+    ]
+    scores = narrative_scores(events)
+    sub = None
+    if trades is not None and ungated:
+        sub = trades.filter(pl.col("variant").is_in(list(ungated)))
+    if sub is None or sub.is_empty() or scores is None:
+        return [*lines, "No judged conviction trades in this run.", ""]
+    found = _outcomes(sub.join(scores, on="mint", how="left"), ["narrative"])
+    lines += ["| Narrative | Trades | Win rate [95% CI] | Expectancy |", "|---|---|---|---|"]
+    for s in (5, 4, 3, 2, 1, None):
+        lines.append(f"| {s or 'none'} | {_outcome_cells(found.get((s,)))} |")
     return [*lines, ""]
 
 
@@ -352,7 +399,8 @@ def report(run: Path) -> list[str]:
     decisions = read_table(run, "decisions")
     stats = summary["stats"]
     headline = headline_variants(variants)
-    conviction_names = {v["name"] for v in variants if v.get("conviction")}
+    conviction_universes = {v["name"]: v["universe"] for v in variants if v.get("conviction")}
+    ungated = {n for n, u in conviction_universes.items() if u == "conviction"}
     lines = [
         f"# M6: paper trading, run {run.name}",
         "",
@@ -415,7 +463,8 @@ def report(run: Path) -> list[str]:
         *RESULT_HEADER,
         *result_rows(table, summary, headline),
         "",
-        *tier_section(trades, conviction_names),
+        *tier_section(trades, conviction_universes),
+        *narrative_section(trades, ungated, Path(summary["source"])),
         *spot_check_section(decisions, trades, gates, headline),
     ]
     lines = lines[:5] + v1_lines + lines[5:]  # right after the title block
@@ -484,8 +533,10 @@ def caveats(n_trades: int) -> list[str]:
         "weights and tier cut-offs are first guesses to be tuned on these results. Its points "
         "come from structural signals with published evidence (copycat, creator record, "
         "early-buyer share, trades to climb the curve, dev and insider shares, holder "
-        "checks). The LLM narrative score (Groq, then Gemini, free tiers) is shown but scores "
-        "nothing: it is logged until it beats the on-chain signals on later data.",
+        "checks). The LLM narrative score (Groq, then Gemini, free tiers) adds no points. "
+        "`conviction` ignores it; `conviction_narrative` uses it only to cap the tier "
+        "(1-2 never buy, 3 at most average, 4 at most good, only 5 very high) and waits for "
+        "the verdict before any entry. Comparing the two shows whether the gate helps.",
         "- Copycats are counted against launches seen since the run started, so a run's first "
         "24 hours find fewer of them.",
         "",

@@ -70,6 +70,7 @@ class Universe:
     kind: str  # "all" (no filter), "new_pairs", "final_stretch" or "conviction"
     stake_lamports: int
     cutoff: float = 0.0  # Final Stretch only: minimum curve progress
+    narrative_gate: bool = False  # conviction only: LLM narrative score caps the tier
 
 
 ALL = Universe("all", "all", NEW_PAIRS_STAKE)
@@ -85,8 +86,10 @@ def universes(max_stake: int = MAX_STAKE) -> list[Universe]:
     return [new_pairs, *stretch]
 
 
-def conviction_universe(max_stake: int = MAX_STAKE) -> Universe:
-    return Universe("conviction", "conviction", min(NEW_PAIRS_STAKE, max_stake))
+def conviction_universe(max_stake: int = MAX_STAKE, narrative_gate: bool = False) -> Universe:
+    name = "conviction_narrative" if narrative_gate else "conviction"
+    stake = min(NEW_PAIRS_STAKE, max_stake)
+    return Universe(name, "conviction", stake, narrative_gate=narrative_gate)
 
 
 def check(
@@ -169,6 +172,7 @@ class Variant:
             "universe": self.universe.name,
             "kind": self.universe.kind,
             "cutoff": self.universe.cutoff,
+            "narrative_gate": self.universe.narrative_gate,
             "stake_lamports": getattr(s, "stake_lamports", None),
             "drop": "conviction tier" if self.conviction else getattr(s, "drop", None),
             "target": getattr(s, "target", None),
@@ -237,7 +241,7 @@ def default_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
     """The grid run side by side, for New Pairs and each Final Stretch cut-off: every
     entry x target x stop at a 2 s delay, plus V1's core rule at 1 s and 5 s delays,
     with a 10-minute stall, and with the largest-holder-sells exit. Then the conviction
-    universe with every target x stop at a 2 s delay."""
+    universe, ungated and narrative-gated, with every target x stop at a 2 s delay."""
     if max_stake > HARD_MAX_STAKE:
         raise ValueError("max_stake is above the 1.5 SOL hard cap")
     out = []
@@ -249,6 +253,7 @@ def default_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
         out += [variant(u, *CORE, delay_ms=d) for d in DELAYS_MS if d != DEFAULT_DELAY_MS]
         out.append(variant(u, *CORE, stall_ms=STALL_MS))
         out.append(variant(u, *CORE, holder_sell=True))
-    conv = conviction_universe(max_stake)
-    out += [conviction_variant(conv, t, s) for t in TARGETS for s in STOP_TOLERANCES]
+    for gate in (False, True):
+        conv = conviction_universe(max_stake, narrative_gate=gate)
+        out += [conviction_variant(conv, t, s) for t in TARGETS for s in STOP_TOLERANCES]
     return out

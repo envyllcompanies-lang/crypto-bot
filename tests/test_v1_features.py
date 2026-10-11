@@ -35,7 +35,7 @@ def test_dollar_levels_use_v1_launch_price():
 
 def test_variant_grid_respects_sizes_and_cap():
     grid = default_variants()
-    assert len(grid) == 4 * (4 * 3 * 2 + 4) + 3 * 2 == 118
+    assert len(grid) == 4 * (4 * 3 * 2 + 4) + 2 * 3 * 2 == 124
     assert len({v.name for v in grid}) == len(grid)
     assert all(v.strategy.stake_lamports <= MAX_STAKE for v in grid)
     stakes = {v.universe.kind: v.strategy.stake_lamports for v in grid}

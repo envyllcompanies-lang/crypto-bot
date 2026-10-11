@@ -293,7 +293,8 @@ def test_report_shows_v1_as_stated_tiers_and_spot_checks(tmp_path):
     sink.add("create", [create_row(name=name, symbol="EVL|")])
     sink.add("trade", [dict(r, timestamp=r["received_ms"] // 1000) for r in dump_tape().rows])
     result = {**with_narrative(5), "x_link": "https://x.com/i/communities/9"}
-    sink.add("lookups", [lookup_row(result, LOOKUP_MS)])
+    verdict = {"narrative_update": True, "narrative": {"score": 5, "theme": "t", "red_flags": []}}
+    sink.add("lookups", [lookup_row(result, LOOKUP_MS), lookup_row(verdict, LOOKUP_MS + 1)])
     sink.flush()
 
     run = tmp_path / "run"
@@ -311,7 +312,10 @@ def test_report_shows_v1_as_stated_tiers_and_spot_checks(tmp_path):
     # Shown even with no trades: Final Stretch takes none in a run's first 40 minutes.
     assert "| final_stretch_50 | dip40\\|tp45\\|sl0\\|d2s | 0 | n/a" in text
     assert "| conviction | tp45\\|sl0\\|d2s | 1 |" in text
-    assert "| good | 1 |" in text and "| very_high | 0 | n/a | n/a |" in text
+    assert "| conviction | good | 1 |" in text
+    assert "| conviction | very_high | 0 | n/a | n/a |" in text
+    narrative = text[text.index("## Conviction by narrative score") :]
+    assert "| 5 | 1 | 0.0%" in narrative and "| 1 | 0 | n/a | n/a |" in narrative
     spot = text[text.index("## Spot-check list") :]
     row = next(line for line in spot.splitlines() if "`Mint1111`" in line)
     assert "| `Evil \\| [click](https://x.example) **coin` (`EVL\\|`) |" in row
@@ -320,3 +324,81 @@ def test_report_shows_v1_as_stated_tiers_and_spot_checks(tmp_path):
     assert "| final_stretch_50 | n/a | n/a | n/a | n/a |" in text  # no network-cost data
     summary = json.loads((run / "summary.json").read_text())
     assert summary["equity_lamports"] == summary["final_balance_lamports"]  # all closed
+
+
+def _gated(score_or_none, base_tier_result=CLEAN, tok=None, judged=True):
+    from cryptobot.conviction import narrative_gate
+
+    conv = conviction(tok or clean_token(), base_tier_result, 4_000, NOW)
+    result = dict(base_tier_result)
+    if judged:
+        result["narrative_done"] = True
+        if score_or_none is not None:
+            result["narrative"] = {"score": score_or_none, "theme": "t", "red_flags": []}
+    return narrative_gate(conv, result)
+
+
+@pytest.mark.parametrize(
+    ("score", "tier", "drop"),
+    [(1, "skip", None), (2, "skip", None), (3, "average", 0.40), (4, "good", 0.25)],
+)
+def test_narrative_gate_caps_a_good_token(score, tier, drop):
+    c = _gated(score)
+    assert (c.score, c.tier, c.drop) == (BASE, tier, drop)  # the score never changes
+
+
+def test_narrative_gate_waits_for_the_verdict_and_caps_an_empty_one():
+    assert (_gated(None, judged=False).tier, _gated(None, judged=False).drop) == (
+        "waiting_narrative",
+        None,
+    )
+    assert _gated(None).tier == "average"  # judge failed or quota spent
+
+
+def test_only_a_five_keeps_very_high():
+    tok = clean_token()
+    tok.creator_graduates = 1  # BASE + 15: very high
+    assert _gated(5, tok=tok).tier == "very_high"
+    tok2 = clean_token()
+    tok2.creator_graduates = 1
+    assert _gated(4, tok=tok2).tier == "good"
+
+
+def test_narrative_gate_never_raises_a_skip():
+    tok = clean_token()
+    tok.copycat = True
+    assert _gated(5, tok=tok).tier == "skip"
+
+
+def gated_signals(tmp_path, score, verdict_ms=LOOKUP_MS + 100):
+    var = conviction_variant(
+        conviction_universe(narrative_gate=True), target=0.45, stop=0.0, delay_ms=500
+    )
+    eng = Engine([var], out=Sink(tmp_path, OUT_SCHEMAS))
+    eng.holder_checks = True
+    eng.request_lookup = lambda *args: None
+    eng.on_create(create_row())
+    looked = judged = False
+    for row in dump_tape().rows:
+        if not looked and row["received_ms"] > LOOKUP_MS:
+            eng.on_lookup(lookup_row(CLEAN, LOOKUP_MS))
+            looked = True
+        if score is not None and not judged and row["received_ms"] > verdict_ms:
+            verdict = {"narrative_update": True, "narrative": {"score": score, "red_flags": []}}
+            eng.on_lookup(lookup_row(verdict, verdict_ms))
+            judged = True
+        eng.on_trade(row)
+    eng.finish()
+    eng.flush()
+    decisions = read_table(tmp_path, "decisions")
+    if decisions is None:
+        return []
+    buys = decisions.filter(decisions["kind"] == "signal_buy")
+    return list(zip(buys["ts_ms"].to_list(), buys["reason"].to_list(), strict=True))
+
+
+def test_gated_universe_enters_by_the_narrative_cap(tmp_path):
+    assert gated_signals(tmp_path / "5", 5) == [(6_000, "conviction 71 good")]
+    assert gated_signals(tmp_path / "3", 3) == [(6_000, "conviction 71 average")]
+    assert gated_signals(tmp_path / "1", 1) == []
+    assert gated_signals(tmp_path / "none", None) == []  # no verdict: waits, never buys
