@@ -9,6 +9,11 @@ V1's X-link and top-5 holder checks need network lookups (holders.py); the paper
 runs them live once per candidate and records the answers. Tracked wallets need a
 curated wallet list we don't have, so that check is recorded as None (not evaluated),
 never as passed, and reports say so.
+
+Beyond V1: the "conviction" universe (the owner's idea, not V1's) takes the same young
+tokens as New Pairs and decides how early to enter from each token's conviction tier
+(conviction.py): at once when conviction is very high, on a 25% or 40% dip when it is
+good or average, never otherwise. Its exits are V1's.
 """
 
 from __future__ import annotations
@@ -57,7 +62,7 @@ NOT_EVALUATED = ("few_tracked_wallets",)
 @dataclass(frozen=True)
 class Universe:
     name: str
-    kind: str  # "all" (no filter), "new_pairs" or "final_stretch"
+    kind: str  # "all" (no filter), "new_pairs", "final_stretch" or "conviction"
     stake_lamports: int
     cutoff: float = 0.0  # Final Stretch only: minimum curve progress
 
@@ -75,10 +80,22 @@ def universes(max_stake: int = MAX_STAKE) -> list[Universe]:
     return [new_pairs, *stretch]
 
 
+def conviction_universe(max_stake: int = MAX_STAKE) -> Universe:
+    return Universe("conviction", "conviction", min(NEW_PAIRS_STAKE, max_stake))
+
+
 def check(u: Universe, tok: TokenState, now_ms: int) -> dict[str, bool | None]:
     """Each V1 rule's result for this token now; None means not evaluated."""
     if u.kind == "all":
         return {}
+    if u.kind == "conviction":
+        # Only the entry gate; the rest is scored, not filtered (conviction.py).
+        return {
+            "not_tainted": tok.tainted is None,
+            "not_graduated": not tok.curve.graduated,
+            "age_le_40m": tok.age_ms(now_ms) <= NEW_PAIRS_MAX_AGE_MS,
+            "mcap_ge_7k": tok.mcap_multiple >= NEW_PAIRS_MIN_MULT,
+        }
     checks: dict[str, bool | None] = {
         "not_tainted": tok.tainted is None,
         "not_graduated": not tok.curve.graduated,
@@ -125,6 +142,7 @@ class Variant:
     strategy: Strategy
     fill: FillConfig
     holder_sell: bool = False  # also exit when the largest holder at entry sells
+    conviction: bool = False  # entry drop comes from the token's conviction tier
 
     def __post_init__(self) -> None:
         stake = getattr(self.strategy, "stake_lamports", 0)
@@ -139,11 +157,12 @@ class Variant:
             "kind": self.universe.kind,
             "cutoff": self.universe.cutoff,
             "stake_lamports": getattr(s, "stake_lamports", None),
-            "drop": getattr(s, "drop", None),
+            "drop": "conviction tier" if self.conviction else getattr(s, "drop", None),
             "target": getattr(s, "target", None),
             "stop_tolerance": getattr(s, "stop_tolerance", None),
             "stall_ms": getattr(s, "stall_ms", None),
             "holder_sell": self.holder_sell,
+            "conviction": self.conviction,
             "delay_ms": f.delay_ms,
             "venue": f.venue.name,
             "fee_bps_per_side": f.venue.fee_bps_per_side,
@@ -181,10 +200,28 @@ def variant(
     return Variant("|".join(parts), u, strategy, FillConfig(delay_ms=delay_ms), holder_sell)
 
 
+def conviction_variant(
+    u: Universe, target: float, stop: float, delay_ms: int = DEFAULT_DELAY_MS
+) -> Variant:
+    """Entry drop from the conviction tier at decision time; V1's exits."""
+    name = f"{u.name}|tp{round(target * 100)}|sl{round(stop * 100)}|d{delay_ms // 1000}s"
+    # drop is replaced by the tier's drop on every entry decision; exits ignore it.
+    strategy = DipBuyer(
+        u.stake_lamports,
+        drop=0.0,
+        target=target,
+        stop_tolerance=stop,
+        min_peak_multiple=1.0,
+        max_age_ms=None,
+    )
+    return Variant(name, u, strategy, FillConfig(delay_ms=delay_ms), conviction=True)
+
+
 def default_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
     """The grid run side by side, for New Pairs and each Final Stretch cut-off: every
     entry x target x stop at a 2 s delay, plus V1's core rule at 1 s and 5 s delays,
-    with a 10-minute stall, and with the largest-holder-sells exit."""
+    with a 10-minute stall, and with the largest-holder-sells exit. Then the conviction
+    universe with every target x stop at a 2 s delay."""
     if max_stake > HARD_MAX_STAKE:
         raise ValueError("max_stake is above the 1.5 SOL hard cap")
     out = []
@@ -196,4 +233,6 @@ def default_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
         out += [variant(u, *CORE, delay_ms=d) for d in DELAYS_MS if d != DEFAULT_DELAY_MS]
         out.append(variant(u, *CORE, stall_ms=STALL_MS))
         out.append(variant(u, *CORE, holder_sell=True))
+    conv = conviction_universe(max_stake)
+    out += [conviction_variant(conv, t, s) for t in TARGETS for s in STOP_TOLERANCES]
     return out

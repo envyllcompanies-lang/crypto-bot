@@ -33,6 +33,11 @@ Beyond replay.py:
   passes every other rule, and entries wait for the answer. The same lookup asks a free
   LLM to rate the token's narrative when a key is set (narrative.py). The answers are
   saved with the run's events, so a replay sees exactly what the live run saw.
+- The conviction universe scores each token 0-100 (conviction.py) from its state and its
+  lookup, and its variants take their entry drop from the score's tier at decision time.
+  Scores use only events that arrived before the decision, so replays match live runs.
+- summary.json marks open positions to market: what selling them into the current curve
+  would bring after fees, without touching the engine's state.
 - Results carry flags: "gap" when the stream dropped while the order or position was
   open, and "missed_trade" when the token's reserves skipped a trade. Tainted tokens
   get no new entries.
@@ -48,19 +53,20 @@ import json
 import os
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 import polars as pl
 
+from cryptobot.conviction import Conviction, blocks, conviction
 from cryptobot.costs import Venue
 from cryptobot.curve import Curve, to_lamports, to_sol
 from cryptobot.features import CopycatWindow, TokenState, is_classic
 from cryptobot.holders import LOOKUP_SCHEMA, PUBLIC_RPC, TOP_N, LookupWorker, classify
 from cryptobot.narrative import make_judge
 from cryptobot.recorder import LIVE, PUBLIC_WS, SCHEMAS, Sink, next_seq, now_ms, record
-from cryptobot.replay import Buy, Position, Sell, TradeResult, View
+from cryptobot.replay import Buy, FillConfig, Position, Sell, TradeResult, View
 from cryptobot.v1 import (
     FINAL_STRETCH_MAX_AGE_MS,
     HARD_MAX_STAKE,
@@ -124,6 +130,27 @@ def _fee(lamports: int, venue: Venue) -> int:
     return -(-int(lamports * venue.fee_bps_per_side) // 10_000)
 
 
+def _proceeds(gross: int, cfg: FillConfig) -> int:
+    """What a sell paying `gross` lamports out of the curve leaves us, after costs."""
+    out = gross - _fee(gross, cfg.venue) - cfg.network_lamports_per_tx
+    return out + cfg.rent_lamports if cfg.rent_refunded else out
+
+
+def _lookup_features(result: dict | None) -> dict:
+    """The lookup's social fields for the gates log; creator-written text is truncated."""
+    if result is None:
+        return {}
+    narrative = result.get("narrative")
+    return {
+        "x_link": result.get("x_link"),
+        "x_kind": result.get("x_kind"),
+        "narrative": None
+        if narrative is None
+        else {k: narrative.get(k) for k in ("score", "theme", "red_flags")},
+        "narrative_error": result.get("narrative_error"),
+    }
+
+
 @dataclass
 class _Pending:
     order: Buy | Sell
@@ -183,6 +210,8 @@ class Engine:
         # Called with (mint, top holders, metadata uri, ts, name, symbol).
         self.request_lookup: Callable[[str, list[str], str, int, str, str], None] | None = None
         self.lookups: dict[str, dict] = {}
+        self.results_by_mint: dict[str, dict] = {}  # parsed result of each good lookup
+        self.convictions: dict[str, Conviction | None] = {}
         self.requested: set[str] = set()
         # Rewritten on every flush, so a report can read a run that is still going.
         self.summary_path: Path | None = None
@@ -273,6 +302,8 @@ class Engine:
         self.stats["lookups_done" if row["error"] is None else "lookup_errors"] += 1
         if row["mint"] in self.tokens:
             self.lookups[row["mint"]] = row
+            if row["error"] is None and row["result"] is not None:
+                self.results_by_mint[row["mint"]] = json.loads(row["result"])
 
     def finish(self) -> None:
         """End of data: land orders in flight, then value open positions."""
@@ -319,12 +350,23 @@ class Engine:
                             tok.mint, tok.top_holders(TOP_N), tok.uri, ts, tok.name, tok.symbol
                         )
                 checks["lookup_done"] = False
-            elif row["error"] is None:
-                checks.update(classify(json.loads(row["result"]), row["received_ms"]))
+            elif u.kind != "conviction" and tok.mint in self.results_by_mint:
+                checks.update(classify(self.results_by_mint[tok.mint], row["received_ms"]))
+        result = self.results_by_mint.get(tok.mint)
+        if u.kind == "conviction":
+            row = self.lookups.get(tok.mint)
+            lookup_ms = None if row is None or result is None else row["received_ms"]
+            conv = self.convictions[tok.mint] = conviction(tok, result, lookup_ms, ts)
+            checks["conviction_tradeable"] = conv is not None and conv.drop is not None
         ok = passes(checks)
         key = (tok.mint, u.name)
         if self.gates.get(key) != ok:
             self.gates[key] = ok
+            features = tok.snapshot(ts) | _lookup_features(result)
+            if u.kind == "conviction":
+                features["conviction"] = (
+                    conv.describe() if conv else {"blocks": blocks(tok, result, lookup_ms, ts)}
+                )
             self._emit(
                 "gates",
                 {
@@ -333,7 +375,7 @@ class Engine:
                     "universe": u.name,
                     "passed": ok,
                     "checks": json.dumps(checks),
-                    "features": json.dumps(tok.snapshot(ts)),
+                    "features": json.dumps(features),
                 },
             )
         return ok
@@ -349,9 +391,17 @@ class Engine:
         if slot.position is None:
             if not gate_ok or slot.entries >= var.fill.max_trades_per_token:
                 return
-            action = var.strategy.decide(view)
+            strategy = var.strategy
+            conv = self.convictions.get(tok.mint) if var.conviction else None
+            if var.conviction:
+                if conv is None or conv.drop is None:
+                    return
+                strategy = replace(strategy, drop=conv.drop)  # a frozen DipBuyer
+            action = strategy.decide(view)
             if not isinstance(action, Buy):
                 return
+            if conv is not None:
+                action = Buy(action.stake_lamports, f"conviction {conv.score} {conv.tier}")
             if action.stake_lamports > HARD_MAX_STAKE:
                 raise ValueError(f"{var.name}: stake above the 1.5 SOL hard cap")
             need = action.stake_lamports + var.fill.network_lamports_per_tx + var.fill.rent_lamports
@@ -451,9 +501,7 @@ class Engine:
         pos = slot.position
         assert pos is not None and slot.curve is not None
         slot.curve, gross = slot.curve.after_sell(pos.tokens)
-        proceeds = gross - _fee(gross, cfg.venue) - cfg.network_lamports_per_tx
-        if cfg.rent_refunded:
-            proceeds += cfg.rent_lamports
+        proceeds = _proceeds(gross, cfg)
         reason = p.order.reason if isinstance(p.order, Sell) else ""
         result = TradeResult(
             entry_decided_ts_ms=pos.decided_ts_ms,
@@ -548,6 +596,8 @@ class Engine:
             self.slots.pop((vi, mint), None)
         self.active.pop(mint, None)
         self.lookups.pop(mint, None)
+        self.results_by_mint.pop(mint, None)
+        self.convictions.pop(mint, None)
         self.requested.discard(mint)
         for u in self.universes:
             self.gates.pop((mint, u.name), None)
@@ -573,15 +623,35 @@ class Engine:
         tmp.write_text(json.dumps({**self.summary_extra, **self.summary()}, indent=1))
         os.replace(tmp, self.summary_path)
 
+    def open_value(self) -> list[int]:
+        """Per variant: open positions sold into today's curve after costs, plus stakes
+        reserved for orders in flight. Read-only: no curve or wallet changes."""
+        value = [0] * len(self.variants)
+        for (vi, mint), slot in self.slots.items():
+            if slot.done:
+                continue
+            if slot.pending is not None:
+                value[vi] += slot.pending.reserved
+            if slot.position is not None:
+                _, gross = self._curve(slot, self.tokens[mint]).after_sell(slot.position.tokens)
+                value[vi] += _proceeds(gross, self.variants[vi].fill)
+        return value
+
     def summary(self) -> dict:
+        open_value = self.open_value()
         return {
             "first_event_ms": self.first_ts,
             "last_event_ms": self.clock,
             "stats": dict(self.stats),
             "variants": len(self.variants),
             "closed_trades": len(self.results),
+            # Cash in each paper wallet; open positions are in open_value_lamports.
             "final_balance_lamports": {
                 v.name: self.balance[i] for i, v in enumerate(self.variants)
+            },
+            "open_value_lamports": {v.name: open_value[i] for i, v in enumerate(self.variants)},
+            "equity_lamports": {
+                v.name: self.balance[i] + open_value[i] for i, v in enumerate(self.variants)
             },
         }
 

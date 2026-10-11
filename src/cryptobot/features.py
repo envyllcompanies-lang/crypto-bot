@@ -27,6 +27,7 @@ BUNDLE_CANDLE_MULT = 2.0
 INSIDER_SLOTS = 1
 # Copycats: a launch reusing a name or symbol seen in this window. Originals graduate
 # about ten times as often as copycats (research report); the window is our choice.
+SHOWN_CHARS = 40  # creator-written names are cut to this in logs
 COPYCAT_WINDOW_MS = 24 * 60 * 60 * 1000
 COPYCAT_MAX_KEYS = 400_000  # memory bound: about 2 days of launches at today's rate
 
@@ -179,6 +180,8 @@ class TokenState:
         """Feature values for the decision log."""
         _, holder_share = self.largest_holder()
         return {
+            "name": self.name[:SHOWN_CHARS],
+            "symbol": self.symbol[:SHOWN_CHARS],
             "age_s": round(self.age_ms(now_ms) / 1000, 3),
             "mcap_multiple": round(self.mcap_multiple, 4),
             "progress": round(self.curve.progress, 4),

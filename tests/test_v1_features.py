@@ -35,11 +35,16 @@ def test_dollar_levels_use_v1_launch_price():
 
 def test_variant_grid_respects_sizes_and_cap():
     grid = default_variants()
-    assert len(grid) == 4 * (4 * 3 * 2 + 4)
+    assert len(grid) == 4 * (4 * 3 * 2 + 4) + 3 * 2 == 118
     assert len({v.name for v in grid}) == len(grid)
     assert all(v.strategy.stake_lamports <= MAX_STAKE for v in grid)
     stakes = {v.universe.kind: v.strategy.stake_lamports for v in grid}
-    assert stakes == {"new_pairs": NEW_PAIRS_STAKE, "final_stretch": FINAL_STRETCH_STAKE}
+    assert stakes == {
+        "new_pairs": NEW_PAIRS_STAKE,
+        "final_stretch": FINAL_STRETCH_STAKE,
+        "conviction": NEW_PAIRS_STAKE,
+    }
+    assert "conviction|tp45|sl0|d2s" in {v.name for v in grid}
 
 
 def test_stakes_above_the_hard_cap_are_refused():
