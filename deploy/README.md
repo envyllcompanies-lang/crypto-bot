@@ -83,4 +83,11 @@ To read the daily report on GitHub (on the `paper-results` branch) instead of lo
 - **Cost check:** the free tier covers the machine, a 30 GB standard disk and 1 GB a month of outbound traffic. The trader mostly downloads, and incoming traffic is free. Google's pricing for the server's public IPv4 address has changed over time, so look at the billing page after a day; the budget alert will also email you.
 - **Disk:** raw events take roughly 0.8 GB a day, and 14 days are kept. Change that with `CRYPTOBOT_KEEP_DAYS=N` in `~/crypto-bot/.env`. Trades, decisions and reports are kept.
 - **Restarts:** each restart starts a new run, and Final Stretch waits 40 minutes again.
+- **Narrative judge (optional, free):** the trader can ask a free LLM tier to rate each candidate token's narrative. Get a free key at https://console.groq.com/keys (Groq, used first) and/or https://aistudio.google.com/apikey (Gemini, the fallback), then type it in yourself on the server, replacing `...` with the key:
+
+  ```bash
+  echo 'GROQ_API_KEY=...' >> ~/crypto-bot/.env && sudo systemctl restart crypto-bot
+  ```
+
+  For Gemini, use `GEMINI_API_KEY=...` the same way. The log line `narrative judge: groq` confirms it (`journalctl -u crypto-bot | grep narrative`); the key itself is never printed. Without a key the narrative is "not evaluated". Free tiers have daily limits; once one runs out, narratives are "not evaluated" until it resets.
 - **Faster feed:** to use a faster data feed later, put `CRYPTOBOT_WS_URL=...` in `~/crypto-bot/.env` yourself and run `sudo systemctl restart crypto-bot`. The URL is never printed.

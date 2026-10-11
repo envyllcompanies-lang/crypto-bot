@@ -71,11 +71,15 @@ Hugging Face search, so it is either private or deleted. Slinky21 replaces it.
   - `trades/`: every closed paper trade, with entry and exit times and prices, cost,
     proceeds, PnL, exit reason and flags.
   - `gates/`: each time a token starts or stops passing a universe's rules, with every
-    rule's result (null = not evaluated) and the token's features.
-  - `variants.json`: the settings of each variant. `summary.json`: counts and final
-    wallet balances.
+    rule's result (null = not evaluated) and the token's features (including its name and
+    symbol cut to 40 characters, copycat flag, X link and narrative; for the conviction
+    universe, the conviction score, tier and points per component, or why it is blocked).
+  - `variants.json`: the settings of each variant. `summary.json`: counts and, per
+    variant, cash, open positions marked to market and equity.
   - `events/` (live runs only): the raw stream, in the recorder's layout, plus `lookups`
     (each holder and X-link lookup: top-5 wallets, their SOL balances, first-transaction
-    times and funders, and the token's X, Telegram and website links), so the run can be
-    replayed exactly.
+    times and funders, the token's X, Telegram and website links and description cut to
+    300 characters, and, when an LLM key is set, the narrative judge's verdict as
+    `narrative` {score 1-5, theme, red_flags, reason, provider, model} or the reason it
+    gave none as `narrative_error`), so the run can be replayed exactly.
 - **Report:** `uv run python -m cryptobot.m6_report [RUN_DIR]`.

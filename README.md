@@ -60,6 +60,19 @@ Final Stretch entries start 40 minutes into a run (see below), so run the paper 
   - all at a 2-second delay.
 
   V1's core rule (40% dip, +45%, exit at entry) also runs at 1 s and 5 s delays, with a 10-minute stall exit, and with a largest-holder-sells exit.
+- **Narrative judge** (`narrative.py`). The same once-per-token lookup sends the token's name, symbol, description and links (plus the text of a linked tweet, from X's free oEmbed endpoint) to a free LLM tier, which rates the narrative 1-5 and lists red flags (copycat, low effort, scam signs, offensive, no story, impersonation):
+  - Groq first (`GROQ_API_KEY`), Gemini as the fallback (`GEMINI_API_KEY`). Both have free tiers.
+  - Keys go in `~/crypto-bot/.env` on the server, typed in by the owner (see `deploy/README.md`). They are never printed or logged.
+  - With no key, or when a call fails or a free quota runs out, the narrative is "not evaluated" and scores a neutral value.
+  - Token text is written by its creator, so it is sent as truncated, clearly marked data, and only an answer in a strict JSON shape is accepted.
+- **Copycats.** A launch whose name or symbol (ignoring case and spaces) was used by another launch in the previous 24 hours is flagged a copycat.
+- **Conviction layer** (`conviction.py`, our proposal on top of V1). Each young token gets a 0-100 score from its narrative score (up to 40 points), X link type, top-5 holder balances, dev and insider shares, pro traders, copycat flag and launch candle, minus 10 per red flag:
+  - 80 or more: very high, buy at once;
+  - 65-80: good, buy a 25% dip from the high;
+  - 50-65: average, buy a 40% dip;
+  - below 50: skip.
+
+  Some tokens are never traded: tainted data, graduated, older than 40 minutes, clustered top-5 funding, or no lookup yet. The "conviction" universe takes New Pairs-sized tokens ($7K or more, up to 40 minutes old, 0.25 SOL stakes) and runs every target and stop above at a 2-second delay. The weights are first guesses to tune on paper results.
 - **Fills.** The M2 fill model:
   - An order lands after the delay, behind every trade that arrived first.
   - It fills on the curve those trades left, with our own price impact.
@@ -68,7 +81,8 @@ Final Stretch entries start 40 minutes into a run (see below), so run the paper 
 
   A test proves the paper engine gives the same trades as the M2 replay engine.
 - **Not evaluated.** V1's "few tracked wallets" check needs a curated list of known traders' wallets, which we don't have, so it's recorded as "not evaluated". A lookup that fails is also recorded as "not evaluated" for that token.
-- **Wallets.** Each variant starts with its own 1 SOL paper wallet; the report shows each wallet's balance.
+- **Wallets.** Each variant starts with its own 1 SOL paper wallet. The report shows each wallet's cash, the value of its open positions (sold into the current curve after fees) and the two together (equity).
+- **Report.** It opens with "V1 as stated" (V1's core rule in each universe, and the conviction variants), then conviction results by tier, and a spot-check list of the last 25 entries with each token's mint, name, X link, conviction and narrative, to check by hand in Axiom or Padre. The full grid follows under "Experiments".
 - **Output.** `data/paper/<run>/` holds `decisions`, `trades` and `gates` as Parquet, plus `variants.json`, `summary.json` and the raw `events/`. See `data/README.md`.
 
 ## Trade size
@@ -86,7 +100,7 @@ Stakes can grow with the wallet, but:
 
 - `src/cryptobot/`
   - **Model:** `curve.py` (bonding curve), `costs.py` (fees, rent, break-even).
-  - **Engines:** `replay.py` (M2 replay engine), `strategies.py` (dip buyer), `paper.py` (M6 engine, live and replay), `features.py` (per-token live state), `v1.py` (V1 rules and variant grid).
+  - **Engines:** `replay.py` (M2 replay engine), `strategies.py` (dip buyer), `paper.py` (M6 engine, live and replay), `features.py` (per-token live state), `v1.py` (V1 rules and variant grid), `holders.py` (holder and X-link lookups), `narrative.py` (LLM narrative judge), `conviction.py` (conviction score).
   - **Data:** `events.py` (event decoding), `recorder.py` (live stream to Parquet), `fetch.py` (Hugging Face downloads), `validate.py` and `chain.py` (data checks).
   - **Reports:** `m0_report.py`, `m1_report.py`, `m5_report.py`, `m6_report.py`.
 - `tests/`: pytest suite.
