@@ -11,6 +11,15 @@ KEEP_DAYS="${CRYPTOBOT_KEEP_DAYS:-14}"
 DAY="$(date -u +%Y-%m-%d)"
 
 mkdir -p data/reports
+# Rebuild the tracked-wallet list from recent recordings. The paper trader picks up the
+# new file within a minute. A failure keeps yesterday's list and the day goes on.
+TRACKED_REPORT="data/reports/$DAY-tracked.md"
+if ! nice -n 10 "$PYTHON" -m cryptobot.tracked --days "${CRYPTOBOT_TRACKED_DAYS:-1}" \
+    > "$TRACKED_REPORT"; then
+  echo "tracked wallets: build failed, keeping the previous list" >&2
+  rm -f "$TRACKED_REPORT"
+fi
+
 REPORT="data/reports/$DAY-paper.md"
 "$PYTHON" -m cryptobot.m6_report > "$REPORT"
 echo "report: $REPORT"
@@ -30,6 +39,7 @@ if [ "${CRYPTOBOT_PUSH_REPORTS:-0}" = "1" ]; then
   fi
   mkdir -p "$work/reports"
   cp "$REPORT" "$work/reports/"
+  [ -f "$TRACKED_REPORT" ] && cp "$TRACKED_REPORT" "$work/reports/"
   git -C "$work" add reports
   if git -C "$work" -c user.name="crypto-bot server" \
       -c user.email="crypto-bot-server@users.noreply.github.com" \

@@ -169,6 +169,10 @@ class TokenState:
         held = [w for w, b in self.balances.items() if b > 0]
         return sorted(held, key=lambda w: (-self.balances[w], w))[:n]
 
+    def tracked_holders(self, tracked: frozenset[str]) -> int:
+        """How many wallets on the tracked list hold this token now."""
+        return sum(1 for w, b in self.balances.items() if b > 0 and w in tracked)
+
     def largest_holder(self) -> tuple[str | None, float]:
         """Wallet holding the most tokens (the curve itself is not a wallet here)."""
         if not self.balances:

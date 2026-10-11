@@ -1,7 +1,9 @@
 # Data
 
 Raw files live in `data/raw/<owner>__<dataset>/` and are never committed. Derived
-files (such as the cached chain check) live in `data/derived/`.
+files (such as the cached chain check) live in `data/derived/`. The tracked-wallet list is
+`data/derived/tracked_wallets.parquet` (with `tracked_wallets.json` for how it was built),
+rebuilt nightly by `uv run python -m cryptobot.tracked` from recent recordings.
 You never need to fetch by hand: analysis code calls `cryptobot.fetch.ensure`, which
 downloads any missing file from Hugging Face on first use (free, no account) and
 reuses it after that. Nothing here is uploaded to GitHub. Fetch with

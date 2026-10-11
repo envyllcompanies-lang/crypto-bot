@@ -18,7 +18,7 @@ import polars as pl
 from cryptobot.curve import to_lamports
 from cryptobot.features import BUNDLE_CANDLE_MULT, PRO_MIN_BUY_LAMPORTS
 from cryptobot.paper import PAPER, read_table
-from cryptobot.v1 import CORE, NOT_EVALUATED, V1_LAUNCH_USD
+from cryptobot.v1 import CORE, MAX_TRACKED_HOLDERS, NOT_EVALUATED, V1_LAUNCH_USD
 
 LAG_HOURS_SHOWN = 48
 SPOT_CHECKS = 25
@@ -414,9 +414,11 @@ def caveats(n_trades: int) -> list[str]:
         "left, with our own price impact, but nobody reacts to our trades.",
         "- V1's X-link and top-5 holder checks are looked up once per candidate; entries "
         "wait for the answer, and a failed lookup leaves those checks not evaluated. "
-        "Not evaluated at all: "
-        + ", ".join(NOT_EVALUATED)
-        + " (needs a curated wallet list). Each variant starts with a 1 SOL wallet.",
+        f"'Few tracked wallets' allows at most {MAX_TRACKED_HOLDERS} holders from the "
+        "tracked-wallet list (tracked.py, rebuilt nightly from recorded trades); until the "
+        "first list exists it is not evaluated"
+        + (". Not evaluated at all: " + ", ".join(NOT_EVALUATED) if NOT_EVALUATED else "")
+        + ". Each variant starts with a 1 SOL wallet.",
         f"- Proxies: 'pro traders' are wallets that bought at least {pro_sol:g} SOL of the "
         f"token; a bundle launch candle is a run to {BUNDLE_CANDLE_MULT:g}x launch before any "
         f"sell; dollar levels assume V1's launch at ${V1_LAUNCH_USD:,}.",

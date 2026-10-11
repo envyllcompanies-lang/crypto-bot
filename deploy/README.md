@@ -47,7 +47,7 @@ This installs uv, Python 3.12 and the pinned packages, then runs the tests. It a
 
 - the paper trader, as a service that restarts after a crash or a reboot;
 - an update check every 15 minutes: new commits on GitHub are pulled and tested, and the trader restarts only if the tests pass;
-- a daily job at 00:10 UTC that writes `data/reports/<date>-paper.md` and deletes raw events older than 14 days.
+- a daily job at 00:10 UTC that rebuilds the tracked-wallet list from the last day of recordings (`data/reports/<date>-tracked.md`; set `CRYPTOBOT_TRACKED_DAYS` in `.env` for more days), writes `data/reports/<date>-paper.md` and deletes raw events older than 14 days. It is capped at 450 MB of memory so it can't starve the trader; if the list build hits the cap, the previous list stays in use.
 
 ## Everyday commands (on the server)
 

@@ -67,6 +67,7 @@ from cryptobot.holders import LOOKUP_SCHEMA, PUBLIC_RPC, TOP_N, LookupWorker, cl
 from cryptobot.narrative import make_judge
 from cryptobot.recorder import LIVE, PUBLIC_WS, SCHEMAS, Sink, next_seq, now_ms, record
 from cryptobot.replay import Buy, FillConfig, Position, Sell, TradeResult, View
+from cryptobot.tracked import TRACKED_PATH, load_list
 from cryptobot.v1 import (
     FINAL_STRETCH_MAX_AGE_MS,
     HARD_MAX_STAKE,
@@ -123,7 +124,16 @@ OUT_SCHEMAS = {
 }
 
 
-EVENT_SCHEMAS = {**SCHEMAS, "lookups": LOOKUP_SCHEMA}
+# Each tracked-wallet list the live run loaded, so a replay uses the same lists.
+TRACKED_SCHEMA = {
+    "seq": pl.UInt64,
+    "received_ms": pl.Int64,
+    "event_index": pl.UInt16,
+    "list_mtime_ms": pl.Int64,
+    "wallets": pl.List(pl.Utf8),
+}
+EVENT_SCHEMAS = {**SCHEMAS, "lookups": LOOKUP_SCHEMA, "tracked": TRACKED_SCHEMA}
+TRACKED_POLL_MS = 60_000
 
 
 def _fee(lamports: int, venue: Venue) -> int:
@@ -213,6 +223,8 @@ class Engine:
         self.results_by_mint: dict[str, dict] = {}  # parsed result of each good lookup
         self.convictions: dict[str, Conviction | None] = {}
         self.requested: set[str] = set()
+        # Tracked-wallet list (tracked.py); None until one is loaded.
+        self.tracked: frozenset[str] | None = None
         # Rewritten on every flush, so a report can read a run that is still going.
         self.summary_path: Path | None = None
         self.summary_extra: dict = {}
@@ -296,6 +308,12 @@ class Engine:
             ts, None, None, "gap", "stream dropped; open tokens get no new entries", None
         )
 
+    def on_tracked(self, row: dict) -> None:
+        """A tracked-wallet list took effect (loaded live, or replayed from the recording)."""
+        self._advance(row["received_ms"])
+        self.tracked = frozenset(row["wallets"])
+        self.stats["tracked_lists"] += 1
+
     def on_lookup(self, row: dict) -> None:
         """A recorded or live answer to a lookup request."""
         self._advance(row["received_ms"])
@@ -327,7 +345,7 @@ class Engine:
     def _gate(self, u: Universe, tok: TokenState, ts: int) -> bool:
         if u.kind == "all":
             return True
-        checks = check(u, tok, ts)
+        checks = check(u, tok, ts, self.tracked)
         if u.kind == "final_stretch":
             members = self.columns[u.name]
             if passes(checks):
@@ -363,6 +381,8 @@ class Engine:
         if self.gates.get(key) != ok:
             self.gates[key] = ok
             features = tok.snapshot(ts) | _lookup_features(result)
+            if self.tracked is not None:
+                features["tracked_holders"] = tok.tracked_holders(self.tracked)
             if u.kind == "conviction":
                 features["conviction"] = (
                     conv.describe() if conv else {"blocks": blocks(tok, result, lookup_ms, ts)}
@@ -674,7 +694,13 @@ def recorded_events(root: Path = LIVE) -> Iterator[tuple[str, dict | int]]:
     connection began.
     """
     frames = []
-    for kind, table in (("create", "create"), ("trade", "trade"), ("lookup", "lookups")):
+    tables = (
+        ("create", "create"),
+        ("trade", "trade"),
+        ("lookup", "lookups"),
+        ("tracked", "tracked"),
+    )
+    for kind, table in tables:
         df = read_table(root, table)
         if df is not None:
             frames.append(df.with_columns(_kind=pl.lit(kind)))
@@ -708,6 +734,9 @@ def run_replay(engine: Engine, root: Path = LIVE) -> None:
         elif kind == "lookup":
             assert isinstance(item, dict)
             engine.on_lookup(item)
+        elif kind == "tracked":
+            assert isinstance(item, dict)
+            engine.on_tracked(item)
         elif kind == "create":
             assert isinstance(item, dict)
             engine.on_create(item)
@@ -715,6 +744,40 @@ def run_replay(engine: Engine, root: Path = LIVE) -> None:
             assert isinstance(item, dict)
             engine.on_trade(item)
     engine.finish()
+
+
+class TrackedFeed:
+    """Loads the tracked-wallet list when its file changes and records each load."""
+
+    def __init__(self, engine: Engine, sink: Sink, path: Path = TRACKED_PATH) -> None:
+        self.engine, self.sink, self.path = engine, sink, path
+        self.mtime_ms: int | None = None
+        self.checked_ms: int | None = None
+
+    def poll(self, ts: int) -> None:
+        if self.checked_ms is not None and ts - self.checked_ms < TRACKED_POLL_MS:
+            return
+        self.checked_ms = ts
+        try:
+            mtime = int(self.path.stat().st_mtime * 1000)
+        except FileNotFoundError:
+            return
+        if mtime == self.mtime_ms:
+            return
+        wallets = load_list(self.path)
+        if wallets is None:
+            return
+        self.mtime_ms = mtime
+        row = {
+            "seq": next_seq(),
+            "received_ms": ts,
+            "event_index": 0,
+            "list_mtime_ms": mtime,
+            "wallets": sorted(wallets),
+        }
+        self.sink.add("tracked", [row])
+        self.engine.on_tracked(row)
+        print(f"tracked-wallet list loaded: {len(wallets)} wallets", flush=True)
 
 
 def run_live(engine: Engine, minutes: float | None, events_dir: Path) -> None:
@@ -734,11 +797,17 @@ def run_live(engine: Engine, minutes: float | None, events_dir: Path) -> None:
     )
     engine.holder_checks = True
     engine.request_lookup = worker.request
+    feed = TrackedFeed(engine, sink)
+    feed.poll(now_ms())
+
+    def on_rows(creates: list[dict], trades: list[dict]) -> None:
+        feed.poll(now_ms())
+        engine.on_rows(creates, trades)
 
     async def stream() -> None:
         task = asyncio.create_task(worker.run())
         try:
-            await record(minutes, url, sink, engine.on_rows, engine.on_gap)
+            await record(minutes, url, sink, on_rows, engine.on_gap)
         finally:
             task.cancel()
 

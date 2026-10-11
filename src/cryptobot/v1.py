@@ -6,9 +6,9 @@ $4.5K, stands for the video's SOL price. Final Stretch is Terminal's "Soon" colu
 entry threshold isn't stated, so each curve-progress cut-off is its own universe.
 
 V1's X-link and top-5 holder checks need network lookups (holders.py); the paper engine
-runs them live once per candidate and records the answers. Tracked wallets need a
-curated wallet list we don't have, so that check is recorded as None (not evaluated),
-never as passed, and reports say so.
+runs them live once per candidate and records the answers. "Few tracked wallets" counts
+holders on the list tracked.py builds from recorded trades; with no list yet it is
+recorded as None (not evaluated), never as passed, and reports say so.
 
 Beyond V1: the "conviction" universe (the owner's idea, not V1's) takes the same young
 tokens as New Pairs and decides how early to enter from each token's conviction tier
@@ -56,7 +56,9 @@ CORE = (0.40, 0.45, 0.0)  # V1's own method: 40% dip, +45% bounce, exit at entry
 
 # Filled in by the paper engine from a live lookup (holders.py); None until then.
 LOOKUP_CHECKS = ("x_link_is_community", "top5_sol_balances_differ", "top5_funding_not_clustered")
-NOT_EVALUATED = ("few_tracked_wallets",)
+NOT_EVALUATED: tuple[str, ...] = ()
+# V1 avoids tokens with "a ton of tracked wallets"; it gives no number. M4 tests others.
+MAX_TRACKED_HOLDERS = 2
 
 
 @dataclass(frozen=True)
@@ -84,8 +86,13 @@ def conviction_universe(max_stake: int = MAX_STAKE) -> Universe:
     return Universe("conviction", "conviction", min(NEW_PAIRS_STAKE, max_stake))
 
 
-def check(u: Universe, tok: TokenState, now_ms: int) -> dict[str, bool | None]:
-    """Each V1 rule's result for this token now; None means not evaluated."""
+def check(
+    u: Universe, tok: TokenState, now_ms: int, tracked: frozenset[str] | None = None
+) -> dict[str, bool | None]:
+    """Each V1 rule's result for this token now; None means not evaluated.
+
+    `tracked` is the tracked-wallet list (tracked.py), or None if none is loaded.
+    """
     if u.kind == "all":
         return {}
     if u.kind == "conviction":
@@ -113,6 +120,9 @@ def check(u: Universe, tok: TokenState, now_ms: int) -> dict[str, bool | None]:
         checks["insiders_le_20pct"] = tok.insider_share <= INSIDERS_MAX_SHARE
         checks["pro_traders_ge_10"] = tok.pro_traders >= PRO_TRADERS_MIN
     checks.update(dict.fromkeys(LOOKUP_CHECKS + NOT_EVALUATED))
+    checks["few_tracked_wallets"] = (
+        None if tracked is None else tok.tracked_holders(tracked) <= MAX_TRACKED_HOLDERS
+    )
     return checks
 
 

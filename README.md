@@ -80,7 +80,7 @@ Final Stretch entries start 40 minutes into a run (see below), so run the paper 
   - Fees are charged as through Terminal with a referral code, and token-account rent is refunded.
 
   A test proves the paper engine gives the same trades as the M2 replay engine.
-- **Not evaluated.** V1's "few tracked wallets" check needs a curated list of known traders' wallets, which we don't have, so it's recorded as "not evaluated". A lookup that fails is also recorded as "not evaluated" for that token.
+- **Tracked wallets.** V1's "few tracked wallets" check uses a list built nightly from the server's own recorded trades (`tracked.py`). It keeps wallets that made money across several tokens after fees, drops bots, snipers and token creators, and tests the list on later data it wasn't built from. A candidate passes with at most 2 listed holders. Until the first list is built, the check is "not evaluated". A lookup that fails is also recorded as "not evaluated" for that token.
 - **Wallets.** Each variant starts with its own 1 SOL paper wallet. The report shows each wallet's cash, the value of its open positions (sold into the current curve after fees) and the two together (equity).
 - **Report.** It opens with "V1 as stated" (V1's core rule in each universe, and the conviction variants), then conviction results by tier, and a spot-check list of the last 25 entries with each token's mint, name, X link, conviction and narrative, to check by hand in Axiom or Padre. The full grid follows under "Experiments".
 - **Output.** `data/paper/<run>/` holds `decisions`, `trades` and `gates` as Parquet, plus `variants.json`, `summary.json` and the raw `events/`. See `data/README.md`.
