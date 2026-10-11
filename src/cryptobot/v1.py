@@ -336,3 +336,45 @@ def trail_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
         for t in TRAILS
         for s in TRAIL_STOPS
     ]
+
+
+# Final Stretch near graduation (11 Oct 2026): the closest to break-even corner of the
+# first backtest (87% cut-off, no dip). Entries, exits and fee venues there, as shadow
+# variants so wallet limits don't decide which tokens get traded.
+STRETCH_DROPS = (0.0, 0.25)
+# (target or None, stop, trail or None)
+STRETCH_EXITS = (
+    (0.05, 0.10, None),
+    (0.10, 0.10, None),
+    (0.45, 0.0, None),
+    (1.00, 0.0, None),
+    (None, 0.10, 0.20),
+    (None, 0.20, 0.30),
+)
+
+
+def stretch_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
+    stake = min(FINAL_STRETCH_STAKE, max_stake)
+    u = Universe("final_stretch_87", "final_stretch", stake, 0.87)
+    out = []
+    for venue in (TERMINAL_REFERRAL, DIRECT):
+        for drop in STRETCH_DROPS:
+            for target, stop, trail in STRETCH_EXITS:
+                parts = [u.name, f"dip{round(drop * 100)}"]
+                parts.append(f"tp{round(target * 100)}" if target else f"trail{round(trail * 100)}")
+                parts += [f"sl{round(stop * 100)}", f"d{DEFAULT_DELAY_MS // 1000}s"]
+                if venue is DIRECT:
+                    parts.append("direct")
+                strategy = DipBuyer(
+                    u.stake_lamports,
+                    drop=drop,
+                    target=target,
+                    stop_tolerance=stop,
+                    min_peak_multiple=1.0,
+                    max_age_ms=None,
+                    quiet_ms=QUIET_MS,
+                    trail=trail,
+                )
+                fill = FillConfig(delay_ms=DEFAULT_DELAY_MS, venue=venue)
+                out.append(Variant("|".join(parts), u, strategy, fill, shadow=True))
+    return out

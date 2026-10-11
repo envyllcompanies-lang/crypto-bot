@@ -303,7 +303,8 @@ def best_section(trades: pl.DataFrame | None) -> list[str]:
     lines = [
         "## Is any variant profitable?",
         "",
-        f"Wallet variants with at least {MIN_TRADES} closed trades, best mean net return per "
+        f"Variants with at least {MIN_TRADES} closed trades (shadow variants included: a "
+        "per-trade mean does not depend on the wallet), best mean net return per "
         "trade first (after fees, before network costs). The interval is a 95% interval on "
         "the mean. With this many variants, the best is the luckiest as well as the best: "
         "only a lower bound above zero, confirmed on later data, would count.",
@@ -580,7 +581,7 @@ def report(run: Path) -> list[str]:
         *RESULT_HEADER,
         *result_rows(table, summary, headline),
         "",
-        *best_section(trades),
+        *best_section(all_trades),
         *chance_section(all_trades, variants),
         *tier_section(trades, conviction_universes),
         *narrative_section(trades, ungated, Path(summary["source"])),

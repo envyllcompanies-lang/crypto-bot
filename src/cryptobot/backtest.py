@@ -39,9 +39,14 @@ from cryptobot.curve import to_lamports, to_sol
 from cryptobot.paper import OUT_SCHEMAS, PAPER, START_BALANCE, Engine
 from cryptobot.recorder import Sink
 from cryptobot.slinky import SLINKY_ROOT, events, files
-from cryptobot.v1 import default_variants, scalp_variants, trail_variants
+from cryptobot.v1 import default_variants, scalp_variants, stretch_variants, trail_variants
 
-GRIDS = {"default": default_variants, "scalp": scalp_variants, "trail": trail_variants}
+GRIDS = {
+    "default": default_variants,
+    "scalp": scalp_variants,
+    "trail": trail_variants,
+    "stretch": stretch_variants,
+}
 
 BACKTEST = PAPER.parent / "backtest"
 PROGRESS_EVERY_MS = 3_600_000
