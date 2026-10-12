@@ -5,10 +5,11 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 for unit in crypto-bot.service crypto-bot-daily.service crypto-bot-daily.timer \
+    crypto-bot-snapshot.service crypto-bot-snapshot.timer \
     crypto-bot-update.service crypto-bot-update.timer; do
   sed -e "s|@USER@|$USER|g" -e "s|@DIR@|$DIR|g" "$DIR/deploy/$unit" \
     | sudo tee "/etc/systemd/system/$unit" >/dev/null
 done
 sudo systemctl daemon-reload
-sudo systemctl enable -q --now crypto-bot-daily.timer crypto-bot-update.timer
+sudo systemctl enable -q --now crypto-bot-daily.timer crypto-bot-update.timer crypto-bot-snapshot.timer
 sudo systemctl enable -q crypto-bot.service

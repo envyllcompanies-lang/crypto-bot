@@ -63,9 +63,20 @@ This installs uv, Python 3.12 and the pinned packages, then runs the tests. It a
 | Follow the backtest | `journalctl -u crypto-bot-backtest -f` |
 | Backtest report | `cd ~/crypto-bot && .venv/bin/python -m cryptobot.m6_report data/backtest/<folder>` |
 
-## Optional: daily report pushed to GitHub
+## Optional: reports pushed to GitHub
 
-To read the daily report on GitHub (on the `paper-results` branch) instead of logging in:
+To read the reports on GitHub (on the `paper-results` branch) instead of logging in. Once
+set up, the server pushes:
+
+- `latest/` every hour at :25 UTC: `paper.md` (the paper report so far), `labels.md` (the
+  thesis and filter breakdown) and `status.md` (is the trader running, code version, disk,
+  memory, restarts). Claude can read these too: ask it to "check the paper trader".
+- `reports/` every night: the dated paper, labels, tracked-wallet and creator reports.
+
+Only these report files are pushed: never `.env`, keys or raw data. The repo is public, so
+anyone can read them; they hold no secrets.
+
+Setup:
 
 1. On the server, run:
 
