@@ -355,7 +355,16 @@ STRETCH_EXITS = (
 
 def stretch_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
     stake = min(FINAL_STRETCH_STAKE, max_stake)
-    u = Universe("final_stretch_87", "final_stretch", stake, 0.87)
+    return exit_grid(Universe("final_stretch_87", "final_stretch", stake, 0.87))
+
+
+def new_pairs_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
+    """The same entries, exits and venues on New Pairs (the owner's focus: new coins)."""
+    return exit_grid(Universe("new_pairs", "new_pairs", min(NEW_PAIRS_STAKE, max_stake)))
+
+
+def exit_grid(u: Universe) -> list[Variant]:
+    """STRETCH_DROPS x STRETCH_EXITS x (Terminal, direct), as shadow variants on `u`."""
     out = []
     for venue in (TERMINAL_REFERRAL, DIRECT):
         for drop in STRETCH_DROPS:
