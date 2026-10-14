@@ -69,6 +69,11 @@ LATE_MAX_AGE_MS = 60 * 60 * 1000
 LEADER_TOP = 50
 LATE_TIMEOUT_MS = 60 * 60 * 1000
 LATE_EXITS = ((0.25, 0.15, None), (None, 0.30, 0.25))  # (target, stop, trail)
+# The quick-hold test (docs/research/2026-10-14-preregistered-quick-hold-test.md): first
+# crossing of 90% at 5-15 minutes old, hold one minute, then sell.
+QUICK_MIN_AGE_MS = 5 * 60 * 1000
+QUICK_MAX_AGE_MS = 15 * 60 * 1000
+QUICK_HOLD_MS = 60 * 1000
 # V1 avoids tokens with "a ton of tracked wallets"; it gives no number. M4 tests others.
 MAX_TRACKED_HOLDERS = 2
 
@@ -85,6 +90,8 @@ class Universe:
     elite: bool = False  # conviction only: one strict rule (conviction.elite_misses)
     thesis: bool = False  # elite only: also require a legit thesis
     leader_top: int = 0  # late only: a top-N tracked wallet must have bought first
+    min_age_ms: int = 0  # late only: token age window at the first crossing
+    max_age_ms: int | None = None  # late only; None = LATE_MAX_AGE_MS
 
 
 ALL = Universe("all", "all", NEW_PAIRS_STAKE)
@@ -133,7 +140,9 @@ def check(
         return {
             "not_tainted": tok.tainted is None,
             "not_graduated": not tok.curve.graduated,
-            "age_le_60m": tok.age_ms(now_ms) <= LATE_MAX_AGE_MS,
+            "age_in_window": u.min_age_ms
+            <= tok.age_ms(now_ms)
+            <= (LATE_MAX_AGE_MS if u.max_age_ms is None else u.max_age_ms),
         }
     if u.kind == "conviction":
         # Only the entry gate; the rest is scored, not filtered (conviction.py).
@@ -213,6 +222,8 @@ class Variant:
             "elite": self.universe.elite,
             "thesis": self.universe.thesis,
             "leader_top": self.universe.leader_top,
+            "min_age_ms": self.universe.min_age_ms,
+            "max_age_ms": self.universe.max_age_ms,
             "shadow": self.shadow,
             "stake_lamports": getattr(s, "stake_lamports", None),
             "drop": "conviction tier" if self.conviction else getattr(s, "drop", None),
@@ -326,6 +337,38 @@ def late_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
     return out
 
 
+def quick_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
+    """The quick-hold test: with and without the top-50 leader rule, hold 1 minute (no
+    target or stop), direct fees, 2 s delay, shadow (every qualifying token)."""
+    out = []
+    stake = min(NEW_PAIRS_STAKE, max_stake)
+    for leader in (True, False):
+        name = "quick_p90_leader" if leader else "quick_p90"
+        u = Universe(
+            name,
+            "late",
+            stake,
+            LATE_CUTOFF,
+            leader_top=LEADER_TOP if leader else 0,
+            min_age_ms=QUICK_MIN_AGE_MS,
+            max_age_ms=QUICK_MAX_AGE_MS,
+        )
+        strategy = DipBuyer(
+            stake,
+            drop=0.0,
+            target=None,
+            stop_tolerance=1.0,  # no stop: the price can't fall below zero
+            min_peak_multiple=1.0,
+            max_age_ms=None,
+            stall_ms=QUICK_HOLD_MS,
+            quiet_ms=QUIET_MS,
+        )
+        fill = FillConfig(delay_ms=DEFAULT_DELAY_MS, venue=DIRECT)
+        variant_name = f"{name}|hold1m|d{DEFAULT_DELAY_MS // 1000}s|direct"
+        out.append(Variant(variant_name, u, strategy, fill, shadow=True))
+    return out
+
+
 def default_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
     """What the paper trader runs (cut to 13 on 14 Oct 2026: every rule that had lost in
     both the backtests and live paper trading was dropped, to trade far less): the two
@@ -342,7 +385,7 @@ def default_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
         )
     labels = labels_universe(max_stake)
     out.append(conviction_variant(labels, *LABEL_PRIMARY, shadow=True))
-    return out + late_variants(max_stake)
+    return out + late_variants(max_stake) + quick_variants(max_stake)
 
 
 def live_grid_14_oct(max_stake: int = MAX_STAKE) -> list[Variant]:

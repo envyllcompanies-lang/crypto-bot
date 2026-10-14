@@ -461,3 +461,31 @@ def test_late_leader_universe_waits_for_a_leader_list(tmp_path):
     d = read_table(tmp_path, "decisions")
     bought = {v.split("|")[0] for v in d.filter(d["kind"] == "signal_buy")["variant"].to_list()}
     assert bought == {"late_p90"}
+
+
+def test_quick_hold_needs_the_cross_inside_its_age_window_and_sells_a_minute_later(tmp_path):
+    from cryptobot.v1 import quick_variants
+
+    def run(offset, name):
+        t = Tape()
+        t.buy(offset, 5, user="leader")
+        for k in range(1, 14):
+            t.buy(offset + k * 3_000, 5, user=f"b{k}")
+        t.buy(offset + 200_000, 0.1, user="late")
+        eng = Engine(quick_variants(), out=Sink(tmp_path / name, OUT_SCHEMAS))
+        eng.on_tracked({"received_ms": 0, "wallets": ["leader"], "top": ["leader"]})
+        eng.on_create(create_row())
+        for row in t.rows:
+            eng.on_trade(row)
+        eng.finish()
+        d = read_table(tmp_path / name, "decisions")
+        return d
+
+    early = run(1_000, "early")  # crosses 90% at about 34 s old: outside 5-15 minutes
+    assert early is None or early.filter(early["kind"] == "signal_buy").is_empty()
+    inside = run(400_000, "inside")  # crosses at about 7 minutes old
+    buys = inside.filter(inside["kind"] == "signal_buy")
+    assert {v.split("|")[0] for v in buys["variant"].to_list()} == {"quick_p90_leader", "quick_p90"}
+    sells = inside.filter(inside["kind"] == "signal_sell")
+    assert sells.height == 2
+    assert all(r == "stall" for r in sells["reason"].to_list())

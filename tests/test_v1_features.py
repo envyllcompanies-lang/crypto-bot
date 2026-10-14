@@ -43,8 +43,10 @@ def test_full_grid_is_kept_for_backtests():
 
 def test_variant_grid_respects_sizes_and_cap():
     grid = default_variants()
-    # 2 elite x 2 exits x 2 venues, 1 shadow labels, 2 late-curve universes x 2 exits.
-    assert len(grid) == 2 * 2 * 2 + 1 + 2 * 2 == 13
+    # 2 elite x 2 exits x 2 venues, 1 shadow labels, 2 late-curve universes x 2 exits,
+    # 2 quick-hold universes.
+    assert len(grid) == 2 * 2 * 2 + 1 + 2 * 2 + 2 == 15
+    assert "quick_p90_leader|hold1m|d2s|direct" in names_of(grid)
     assert "late_p90_leader|tp25|sl15|d2s|direct" in names_of(grid)
     names = {v.name for v in grid}
     assert "elite_thesis|dip0|tp5|sl10|d2s|direct" in names
