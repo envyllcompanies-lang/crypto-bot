@@ -368,7 +368,10 @@ def _chunk(args: tuple[int, list[tuple], Params, Path]) -> int:
 
 def write_part(rows: list[tuple], part: Path) -> None:
     """Rows to a parquet part, written under a temporary name and then renamed."""
-    df = pl.DataFrame(rows, schema=["mint", *columns()], orient="row")
+    types = [pl.String, pl.String, pl.String, pl.String, pl.Int64, pl.Int64, pl.Int64,
+             pl.Int64, pl.String, pl.String, pl.Int64, pl.Int64, pl.Float64, pl.Float64]  # fmt: skip
+    schema = dict(zip(["mint", *columns()], types, strict=True))
+    df = pl.DataFrame(rows, schema=schema, orient="row")
     tmp = part.with_suffix(".tmp")
     df.write_parquet(tmp)
     tmp.rename(part)
@@ -425,7 +428,7 @@ def _pct(x: float | None) -> str:
 
 def report(df: pl.DataFrame, min_n: int = 200) -> str:
     cut = int(DISCOVERY_END.timestamp() * 1000)
-    df = df.with_columns(half=pl.when(pl.col("created_ms") < cut).then(pl.lit("discovery"))
+    df = df.with_columns(period=pl.when(pl.col("created_ms") < cut).then(pl.lit("discovery"))
                          .otherwise(pl.lit("holdout")))  # fmt: skip
     first = datetime.fromtimestamp(df["created_ms"].min() / 1000, UTC)
     last = datetime.fromtimestamp(df["created_ms"].max() / 1000, UTC)
@@ -445,9 +448,9 @@ def report(df: pl.DataFrame, min_n: int = 200) -> str:
     ]
     for venue in df["venue"].unique().sort():
         v = df.filter(pl.col("venue") == venue)
-        s = _summary(v, ["entry", "exit", "half"])
-        disc = s.filter((pl.col("half") == "discovery") & (pl.col("n") >= min_n))
-        hold = s.filter(pl.col("half") == "holdout")
+        s = _summary(v, ["entry", "exit", "period"])
+        disc = s.filter((pl.col("period") == "discovery") & (pl.col("n") >= min_n))
+        hold = s.filter(pl.col("period") == "holdout")
         joined = disc.join(hold, on=["entry", "exit"], suffix="_h", how="left").sort(
             "mean", descending=True
         )
