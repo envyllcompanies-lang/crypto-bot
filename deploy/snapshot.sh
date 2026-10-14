@@ -11,6 +11,7 @@ OUT="data/reports/latest"
 mkdir -p "$OUT"
 
 "$PYTHON" -m cryptobot.m6_report > "$OUT/paper.md" || rm -f "$OUT/paper.md"
+"$PYTHON" -m cryptobot.review > "$OUT/review.md" || rm -f "$OUT/review.md"
 "$PYTHON" -m cryptobot.labels --out data/derived/labels-latest.parquet > "$OUT/labels.md" \
   || rm -f "$OUT/labels.md"
 {
@@ -26,4 +27,4 @@ mkdir -p "$OUT"
 } > "$OUT/status.md"
 
 bash "$DIR/deploy/push.sh" latest "Snapshot $(date -u '+%Y-%m-%d %H:%M')" \
-  "$OUT/paper.md" "$OUT/labels.md" "$OUT/status.md"
+  "$OUT/paper.md" "$OUT/review.md" "$OUT/labels.md" "$OUT/status.md"

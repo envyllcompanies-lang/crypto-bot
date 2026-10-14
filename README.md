@@ -33,6 +33,7 @@ uv run python -m cryptobot.m6_report
 | `uv run python -m cryptobot.paper replay --events DIR` | Runs the same engine over recorded events (a run's `events/` folder or `data/live`). A live session replays to identical trades. |
 | `uv run python -m cryptobot.m6_report [RUN_DIR]` | Report for a paper run (default: the latest) or a backtest folder. |
 | `uv run python -m cryptobot.backtest [--from DAY] [--to DAY]` | M3 backtest: the same engine and variants over Slinky21's downloaded history (`slinky.py` streams it an hour at a time, in chain order). No lookups exist for the past, so V1's holder and X checks are skipped and conviction runs offline. Writes `data/backtest/<time>/`. |
+| `uv run python -m cryptobot.review` | Every closed paper trade from every run, pooled: strategy groups, best and worst variants with 95% intervals, how trades ended, the base rate, biggest wins and losses. Light enough to run on the server. |
 | `uv run python -m cryptobot.labels` | Labelled outcomes from every paper and backtest run (training data for the learned scorer). |
 | `uv run python -m cryptobot.recorder [--minutes N]` | Records events only, into `data/live`. |
 | `uv run python -m cryptobot.m5_report` | Checks the recorded events against the curve formula. |
