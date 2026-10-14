@@ -3,9 +3,13 @@
 A different bet from dip buying: instead of reading the chart, ride with traders who
 have been right before. The test is strictly out of sample:
 
-1. Leaders are picked on 1-23 Sep only (tracked.positions and tracked.score: closed
+1. Leaders are picked on 1-23 Sep only. `tracked`: tracked.score's rule (closed
    positions on several tokens, a win rate of at least half, up overall, no bots,
-   snipers or creators). `top50` is the 50 most profitable of them.
+   snipers or creators); `top50` is the 50 most profitable of them. `copyable`: wallets
+   whose own buys, copied 2 s late through the fill model and sold when they sold,
+   made money after fees on at least 15 tokens (mean and median above zero). Ranking
+   by what a follower would have made, not by the wallet's own profit, follows the
+   research advice in reports/2026-10-14-strategy-research.md.
 2. From 24 Sep on, when a leader buys a classic token at most an hour old, we decide
    to buy at the moment that trade reaches us; the order lands 2 s later (screen.py's
    fill model, checked against replay.py). `copy_first` follows the first leader in a
@@ -29,6 +33,7 @@ import numpy as np
 import polars as pl
 
 from cryptobot import tracked
+from cryptobot.costs import TERMINAL_REFERRAL
 from cryptobot.screen import (
     DEFAULT_PARAMS,
     DISCOVERY_END,
@@ -49,6 +54,8 @@ OUT = DERIVED / "follow.parquet"
 LEADERS = DERIVED / "follow_leaders.parquet"
 MAX_AGE_MS = 60 * MINUTE
 TOP = 50
+MIN_COPIED = 15  # copied trades a wallet needs in discovery to make the copyable list
+VENUES_SCORE = (TERMINAL_REFERRAL,)
 
 EXITS = (
     Exit("leader", leader=True),
@@ -60,18 +67,63 @@ EXITS = (
 
 
 def build_leaders(root: Path = SLINKY_ROOT, out: Path = LEADERS) -> pl.DataFrame:
-    """Score every wallet on trades before DISCOVERY_END; keep the tracked ones."""
+    """Score every wallet on trades before DISCOVERY_END.
+
+    Keeps the tracked wallets and, as candidates for the copyable list, every other
+    wallet that is not a bot and closed at least MIN_COPIED positions at a profit.
+    """
     trades, creates = tracked.load_slinky(root)
     cut = int(DISCOVERY_END.timestamp() * 1000)
     trades = trades.filter(pl.col("ts_ms") < cut)
     creates = creates.filter(pl.col("block_time").dt.epoch("ms") < cut)
     pos = tracked.positions(trades, creates)
-    scored = tracked.score(pos, creates).filter("tracked").sort("pnl", descending=True)
+    scored = (
+        tracked.score(pos, creates)
+        .filter(
+            pl.col("tracked")
+            | (~pl.col("bot") & (pl.col("closed") >= MIN_COPIED) & (pl.col("pnl") > 0))
+        )
+        .sort("pnl", descending=True)
+    )
     out.parent.mkdir(parents=True, exist_ok=True)
     scored.write_parquet(out)
-    meta = {"wallets": scored.height, "positions": pos.height, "until": DISCOVERY_END.isoformat()}
+    meta = {
+        "wallets": int(scored["tracked"].sum()),
+        "candidates": scored.height,
+        "positions": pos.height,
+        "until": DISCOVERY_END.isoformat(),
+    }
     out.with_suffix(".json").write_text(json.dumps(meta, indent=1))
     return scored
+
+
+def copy_each_leader(
+    ts: np.ndarray,
+    vsol: np.ndarray,
+    vtok: np.ndarray,
+    users: np.ndarray,
+    is_buy: np.ndarray,
+    created_ms: int,
+    candidates: frozenset[str],
+    p: Params = DEFAULT_PARAMS,
+) -> list[tuple]:
+    """Copy every candidate's first buy on this token, selling when it sells.
+
+    The entry name is the wallet, so results can be grouped into each wallet's
+    copyable return: what a follower 2 s behind would have made, after fees.
+    """
+    rows: list[tuple] = []
+    young = (ts - created_ms) <= MAX_AGE_MS
+    seen: set[str] = set()
+    for b in np.flatnonzero(is_buy & young):
+        u = users[b]
+        if u in seen or u not in candidates:
+            continue
+        seen.add(u)
+        sells = (users == u) & ~is_buy
+        rows += simulate(ts, vsol, vtok, created_ms, exits=EXITS[:1], venues=VENUES_SCORE,
+                         p=p, starts=[(u, int(b))], leader_sell=sells)  # fmt: skip
+    return rows
 
 
 def follow_token(
@@ -108,12 +160,15 @@ def follow_token(
     return rows
 
 
-def _chunk(args: tuple[int, list[tuple], dict[str, frozenset[str]], Params]) -> pl.DataFrame:
-    k, chunks, lists, p = args
+def _chunk(args: tuple) -> pl.DataFrame:
+    """One create file's tokens: `score` copies each candidate, `follow` runs the lists."""
+    k, chunks, lists, p, mode = args
     os.environ.setdefault("POLARS_MAX_THREADS", "1")
     _, create_path, _ = chunks[k]
     cut = int(DISCOVERY_END.timestamp() * 1000)
-    creates = _classic_creates(create_path).filter(pl.col("created_ms") >= cut)
+    creates = _classic_creates(create_path)
+    in_period = pl.col("created_ms") < cut if mode == "score" else pl.col("created_ms") >= cut
+    creates = creates.filter(in_period)
     if creates.is_empty():
         return pl.DataFrame()
     trade_paths = [c[2] for c in chunks[k : k + 1 + FOLLOW_FILES]]
@@ -148,33 +203,69 @@ def _chunk(args: tuple[int, list[tuple], dict[str, frozenset[str]], Params]) -> 
         if a == b:
             continue
         mint = mints[a]
-        got = follow_token(
+        args_ = (
             cols["ts"][a:b],
             cols["virtual_sol_reserves"][a:b],
             cols["virtual_token_reserves"][a:b],
             cols["trade_user"][a:b],
             cols["is_buy"][a:b],
             created[mint],
-            lists,
-            p,
         )
+        if mode == "score":
+            got = copy_each_leader(*args_, lists["candidates"], p)
+        else:
+            got = follow_token(*args_, lists, p)
         rows += [(mint, *r) for r in got]
     print(f"{create_path.name}: {len(created):,} launches, {len(rows):,} trades", flush=True)
     return pl.DataFrame(rows, schema=["mint", *columns()], orient="row")
+
+
+def _pool(jobs: int, root: Path, lists: dict, p: Params, mode: str) -> pl.DataFrame:
+    chunks = files(root)
+    ctx = multiprocessing.get_context("spawn")
+    work = [(k, chunks, lists, p, mode) for k in range(len(chunks))]
+    with ProcessPoolExecutor(jobs, mp_context=ctx) as pool:
+        parts = list(pool.map(_chunk, work))
+    df = pl.concat([d for d in parts if d.height], how="vertical_relaxed")
+    return df.unique(["mint", "entry", "exit", "venue"], keep="first")
+
+
+def copyable(scores: pl.DataFrame, min_copied: int = MIN_COPIED) -> pl.DataFrame:
+    """Wallets whose copied trades (2 s late, after fees) made money in discovery.
+
+    Mean and median must both be positive, so one lucky runner can't carry a wallet.
+    """
+    return (
+        scores.group_by(wallet=pl.col("entry"))
+        .agg(
+            copied=pl.len(),
+            mean=pl.col("net_return").mean(),
+            median=pl.col("net_return").median(),
+            win=(pl.col("net_return") > 0).mean(),
+        )
+        .filter((pl.col("copied") >= min_copied) & (pl.col("mean") > 0) & (pl.col("median") > 0))
+        .sort("mean", descending=True)
+    )
 
 
 def run(out: Path, jobs: int, root: Path = SLINKY_ROOT, p: Params = DEFAULT_PARAMS):
     if not LEADERS.exists():
         build_leaders(root)
     board = pl.read_parquet(LEADERS)
-    users = board["user"].to_list()
-    lists = {"tracked": frozenset(users), f"top{TOP}": frozenset(users[:TOP])}
-    chunks = files(root)
-    ctx = multiprocessing.get_context("spawn")
-    with ProcessPoolExecutor(jobs, mp_context=ctx) as pool:
-        parts = list(pool.map(_chunk, [(k, chunks, lists, p) for k in range(len(chunks))]))
-    df = pl.concat([d for d in parts if d.height], how="vertical_relaxed")
-    df = df.unique(["mint", "entry", "exit", "venue"], keep="first")
+    users = board.filter("tracked")["user"].to_list()
+    scores = _pool(jobs, root, {"candidates": frozenset(board["user"].to_list())}, p, "score")
+    scores.write_parquet(DERIVED / "follow_scores.parquet")
+    good = copyable(scores)
+    good.write_parquet(DERIVED / "follow_copyable.parquet")
+    lists = {
+        "tracked": frozenset(users),
+        f"top{TOP}": frozenset(users[:TOP]),
+        "copyable": frozenset(good["wallet"].to_list()),
+    }
+    meta = json.loads(LEADERS.with_suffix(".json").read_text())
+    meta |= {"copyable": good.height, "copied_in_discovery": scores.height}
+    LEADERS.with_suffix(".json").write_text(json.dumps(meta, indent=1))
+    df = _pool(jobs, root, lists, p, "follow")
     df.write_parquet(out)
     return df
 

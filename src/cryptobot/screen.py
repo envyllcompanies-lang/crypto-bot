@@ -476,13 +476,40 @@ def report(df: pl.DataFrame, min_n: int = 200) -> str:
     return "\n".join(lines)
 
 
+POOLS = SLINKY_ROOT.parent / "loopholetape__pumpfun-launches/data/graduation_pools"
+
+
+def pools_summary(root: Path = POOLS) -> str:
+    """What PumpSwap pools did in the 30 minutes after graduation (loopholetape data)."""
+    d = pl.read_parquet(root / "graduation_pools.parquet")
+    r = d.filter(pl.col("complete") == 1)["price_ratio_30m"].drop_nulls()
+    first = datetime.fromtimestamp(d["open_t"].min(), UTC)
+    last = datetime.fromtimestamp(d["open_t"].max(), UTC)
+    collapsed = d["collapsed_t"].drop_nulls()
+    return "\n".join(
+        [
+            f"Pools opened {first:%Y-%m-%d} to {last:%Y-%m-%d}: {d.height:,}; "
+            f"complete 30-minute captures with a price ratio: {r.len():,}",
+            f"Median price at 30 min / opening price: {r.median():.3f}",
+            f"Below half the opening price: {_pct((r < 0.5).mean())}; "
+            f"above it: {_pct((r > 1).mean())}; above 2x: {_pct((r > 2).mean())}",
+            f"Fell to 10% of the opening price within 30 min: {collapsed.len():,} of "
+            f"{d.height:,}, median {collapsed.median():.0f} s after opening",
+        ]
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--out", type=Path, default=OUT)
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--delay-ms", type=int, default=2_000)
     parser.add_argument("--report", type=Path, help="write the report for this result file")
+    parser.add_argument("--pools", action="store_true", help="post-graduation pool summary")
     args = parser.parse_args(argv)
+    if args.pools:
+        print(pools_summary())
+        return
     if args.report:
         print(report(pl.read_parquet(args.report)))
         return

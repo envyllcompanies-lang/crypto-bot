@@ -27,3 +27,19 @@ def test_no_leader_no_trade():
     users = np.array(["x"] * ts.size, dtype=object)
     is_buy = np.ones(ts.size, bool)
     assert follow_token(ts, vsol, vtok, users, is_buy, 0, {"t": frozenset({"w"})}) == []
+
+
+def test_copy_each_leader_names_the_wallet_and_copyable_needs_mean_and_median():
+    import polars as pl
+
+    from cryptobot.follow import copy_each_leader, copyable
+
+    _, ts, vsol, vtok = token(5)
+    users = np.array([f"w{k % 7}" for k in range(ts.size)], dtype=object)
+    is_buy = np.diff(np.concatenate(([vsol[0] - 1], vsol))) >= 0
+    rows = copy_each_leader(ts, vsol, vtok, users, is_buy, int(ts[0]) - 1, frozenset({"w2"}))
+    assert {r[0] for r in rows} == {"w2"}
+    scores = pl.DataFrame(
+        {"entry": ["a"] * 15 + ["b"] * 15, "net_return": [0.1] * 15 + [-0.1] * 14 + [5.0]}
+    )
+    assert copyable(scores)["wallet"].to_list() == ["a"]  # b: positive mean, negative median
