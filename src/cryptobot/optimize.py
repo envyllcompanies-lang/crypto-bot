@@ -94,7 +94,33 @@ def _ci(m: float | None, h: float | None) -> str:
     return f"{_pct(m)} [{_pct(m - h)} to {_pct(m + h)}]"
 
 
-def report(honest: pl.DataFrame, hindsight: pl.DataFrame, delay_ms: int) -> str:
+def graduation_check(df: pl.DataFrame, cell: dict) -> dict:
+    """How much of a cell's result rests on positions open when the curve completed.
+
+    Those are valued at the final curve price; after graduation the token trades on
+    PumpSwap, which our data doesn't cover. `needed` is the mean return the graduated
+    positions must really achieve for the cell to break even on the holdout.
+    """
+    keys = ["entry", "exit", "age"]
+    c = df.filter(*[pl.col(k) == cell[k] for k in keys], pl.col("period") == "holdout")
+    if cell["led"] != "either":
+        c = c.filter(pl.col("led") == (cell["led"] == "yes"))
+    grad = pl.col("flag") == "graduated"
+    g, rest = c.filter(grad), c.filter(~grad)
+    share = g.height / c.height if c.height else 0.0
+    rest_mean = rest["net_return"].mean() if rest.height else 0.0
+    needed = None if share == 0 else -(1 - share) * rest_mean / share
+    return {
+        "share": share,
+        "graduated_mean": g["net_return"].mean() if g.height else None,
+        "rest_mean": rest_mean,
+        "needed": needed,
+    }
+
+
+def report(
+    honest: pl.DataFrame, hindsight: pl.DataFrame, delay_ms: int, grad: dict | None = None
+) -> str:
     tried = honest.height
     lines = [
         "# Highest-return search over the history",
@@ -124,6 +150,17 @@ def report(honest: pl.DataFrame, hindsight: pl.DataFrame, delay_ms: int) -> str:
             f"({'positive with its 95% interval above zero' if ok else 'not proven positive'}"
             f", n {best['n_h'] or 0:,}).",
         ]
+    if grad is not None and grad["needed"] is not None:
+        lines += [
+            "",
+            f"**Graduation check for the winner (holdout):** {_pct(grad['share'])} of its "
+            "trades were still open when the curve completed. They are valued at the final "
+            f"curve price ({_pct(grad['graduated_mean'])} on average); the other trades "
+            f"averaged {_pct(grad['rest_mean'])}. To break even, the graduated positions "
+            f"must really return at least {_pct(grad['needed'])} when sold on PumpSwap, so "
+            "this result stands or falls on post-graduation fills, which this data can't "
+            "measure.",
+        ]
     pos_disc = honest.filter(pl.col("mean") > 0)
     both_pos = pos_disc.filter(pl.col("mean_h") > 0)
     lines += [
@@ -152,8 +189,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--follow", type=Path, default=DERIVED / "follow_d0")
     parser.add_argument("--delay-ms", type=int, default=0)
     args = parser.parse_args(argv)
-    honest, hindsight = search(cells(args.timing, args.follow))
-    print(report(honest, hindsight, args.delay_ms))
+    df = cells(args.timing, args.follow)
+    honest, hindsight = search(df)
+    grad = graduation_check(df, honest.row(0, named=True)) if honest.height else None
+    print(report(honest, hindsight, args.delay_ms, grad))
 
 
 if __name__ == "__main__":
