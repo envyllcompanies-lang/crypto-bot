@@ -368,8 +368,8 @@ def _chunk(args: tuple[int, list[tuple], Params, Path]) -> int:
 
 def write_part(rows: list[tuple], part: Path) -> None:
     """Rows to a parquet part, written under a temporary name and then renamed."""
-    types = [pl.String, pl.String, pl.String, pl.String, pl.Int64, pl.Int64, pl.Int64,
-             pl.Int64, pl.String, pl.String, pl.Int64, pl.Int64, pl.Float64, pl.Float64]  # fmt: skip
+    s, i, f = pl.String, pl.Int64, pl.Float64
+    types = [s, s, s, s, i, i, i, i, s, s, i, i, f, f]
     schema = dict(zip(["mint", *columns()], types, strict=True))
     df = pl.DataFrame(rows, schema=schema, orient="row")
     tmp = part.with_suffix(".tmp")
