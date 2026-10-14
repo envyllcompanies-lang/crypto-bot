@@ -14,6 +14,17 @@ website:
 - **Wikipedia** yesterday's top 1,000 English articles (attention.wiki_top). Matched by
   name or ticker. On the history, coins that matched graduated 6.8% of the time against
   3.1% (reports/2026-10-14-attention-wikipedia.md).
+- **DexScreener community takeovers** (a community took over an abandoned coin), by mint.
+- **CoinGecko** top-searched coins (`/search/trending`, free, no key), by name or ticker.
+- **4chan /biz/** catalog (the official read-only API, once a minute): counts of mint
+  addresses and $TICKERs in thread openers and their latest replies, and `biz_spike` for
+  words mentioned at least four times their own day-long baseline (`Spikes`).
+- **Bluesky** posts (Jetstream, free, no login): mint addresses and $TICKERs counted
+  over the last hour.
+
+X, Telegram call channels and Pump.fun's own comments are left out: X is paid or
+scraped against its terms, Telegram's user API risks the account and now bans scraping,
+and Pump.fun's frontend API is undocumented (reports/2026-10-14-social-sources.md).
 
 `run` polls the sources, saves every snapshot under data/live/social/<source>/<date>/,
 and keeps a compact current state in data/derived/social_now.json. The paper trader
@@ -28,6 +39,7 @@ Usage: uv run python -m cryptobot.social run      (on the server: crypto-bot-soc
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import re
 import sys
@@ -52,7 +64,22 @@ SOURCES = {
     "dex_profiles": ("https://api.dexscreener.com/token-profiles/latest/v1", 120),
     "gt_trending": ("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools", 300),
     "google_trends": ("https://trends.google.com/trending/rss?geo=US", 900),
+    "dex_takeovers": ("https://api.dexscreener.com/community-takeovers/latest/v1", 300),
+    "cg_trending": ("https://api.coingecko.com/api/v3/search/trending", 600),
+    # 4chan's official read-only API asks for at most one request a second; once a minute.
+    "biz": ("https://a.4cdn.org/biz/catalog.json", 60),
 }
+MINT_SOURCES = (
+    "dex_boosts",
+    "dex_profiles",
+    "dex_takeovers",
+    "gt_trending",
+    "biz_mint",
+    "bsky_mint",
+)
+JETSTREAM = "wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post"
+BSKY_EVERY_S = 300
+BSKY_WINDOW_MS = 3600 * 1000  # Bluesky mention counts cover the last hour
 WIKI_EVERY_S = 6 * 3600
 KEEP_MS = 6 * 3600 * 1000  # a signal counts for six hours after it was last seen
 TICK_S = 10
@@ -107,6 +134,138 @@ def parse_google(raw: bytes) -> list[tuple[str, str, float, str]]:
     return rows
 
 
+def parse_cg(raw: bytes) -> list[tuple[str, str, float, str]]:
+    """CoinGecko's top-searched coins: name and ticker as keywords, by rank."""
+    rows = []
+    for rank, c in enumerate(json.loads(raw).get("coins", []), 1):
+        item = c.get("item", {})
+        for k in {norm(item.get("name")), norm(item.get("symbol"))}:
+            if len(k) >= MIN_KEY_CHARS:
+                rows.append(("cg_trending", k, float(rank), item.get("name") or ""))
+    return rows
+
+
+BASE58_MINT = re.compile(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b")
+CASHTAG = re.compile(r"\$([A-Za-z][A-Za-z0-9]{2,11})\b")
+TAG = re.compile(r"<[^>]+>")
+
+
+def mentions(text: str) -> tuple[list[str], list[str]]:
+    """Mint addresses and $TICKER keywords mentioned in a piece of text."""
+    mints = BASE58_MINT.findall(text)
+    tickers = [norm(t) for t in CASHTAG.findall(text)]
+    return mints, [t for t in tickers if len(t) >= MIN_KEY_CHARS]
+
+
+WORD = re.compile(r"[A-Za-z][A-Za-z0-9]{3,19}")
+BIZ_MAX_SHARE = 0.05  # a word in more than 5% of posts is generic, not a coin's name
+
+
+class Spikes:
+    """Flags words mentioned far more than their own baseline (an exponentially weighted
+    average over about a day of polls). Ordinary words sit near their baseline; a coin
+    name that suddenly gets talked about jumps above it."""
+
+    def __init__(self, kind: str, alpha: float = 1 / 1440, warmup: int = 60) -> None:
+        self.kind, self.alpha, self.warmup = kind, alpha, warmup
+        self.base: dict[str, float] = {}
+        self.polls = 0
+
+    def update(self, counts: dict[str, float], min_count: float = 3, ratio: float = 4.0):
+        self.polls += 1
+        rows = []
+        for w in set(self.base) | set(counts):
+            n = counts.get(w, 0.0)
+            base = self.base.get(w, 0.0)
+            if self.polls > self.warmup and n >= min_count and n >= ratio * (base + 0.5):
+                rows.append((self.kind, w, n / (base + 0.5), ""))
+            new = base + self.alpha * (n - base)
+            if new < 0.01 and n == 0:
+                self.base.pop(w, None)  # forget words that stopped appearing
+            else:
+                self.base[w] = new
+        return rows
+
+
+def parse_biz(raw: bytes) -> list[tuple[str, str, float, str]]:
+    """/biz/ thread openers and the latest replies the catalog shows: counts of mint
+    addresses and $TICKERs, and of distinctive words (`biz_word`: in at least two posts
+    but at most 5% of them), since /biz/ mostly names coins in plain words."""
+    counts: dict[tuple[str, str], int] = {}
+    word_posts: dict[str, int] = {}
+    n_posts = 0
+    for page in json.loads(raw):
+        for thread in page.get("threads", []):
+            for post in [thread, *thread.get("last_replies", [])]:
+                # <wbr> splits long words (mint addresses) in 4chan's HTML: drop it first.
+                raw_text = f"{post.get('sub', '')} {post.get('com', '')}".replace("<wbr>", "")
+                text = html.unescape(TAG.sub(" ", raw_text))
+                n_posts += 1
+                mints, tickers = mentions(text)
+                for m in mints:
+                    counts[("biz_mint", m)] = counts.get(("biz_mint", m), 0) + 1
+                for t in tickers:
+                    counts[("biz_ticker", t)] = counts.get(("biz_ticker", t), 0) + 1
+                for w in {norm(w) for w in WORD.findall(text)}:
+                    word_posts[w] = word_posts.get(w, 0) + 1
+    limit = max(2, int(n_posts * BIZ_MAX_SHARE))
+    for w, n in word_posts.items():
+        if 2 <= n <= limit and len(w) >= MIN_KEY_CHARS:
+            counts[("biz_word", w)] = n  # raw counts; run() keeps only spikes (Spikes)
+    return [(kind, key, float(n), "") for (kind, key), n in counts.items()]
+
+
+class BlueskyCounter:
+    """Counts mint addresses and $TICKERs in every public Bluesky post (Jetstream, free,
+    no login), keeping only matches, so memory stays small."""
+
+    def __init__(self) -> None:
+        import threading
+
+        self.seen: list[tuple[int, str, str]] = []  # (ms, kind, key)
+        self.posts = 0
+        self.lock = threading.Lock()  # add() runs in the listener thread, rows() in the main
+
+    def add(self, text: str, now_ms: int) -> None:
+        mints, tickers = mentions(text)
+        with self.lock:
+            self.posts += 1
+            self.seen += [(now_ms, "bsky_mint", m) for m in mints]
+            self.seen += [(now_ms, "bsky_ticker", t) for t in tickers]
+
+    def rows(self, now_ms: int) -> list[tuple[str, str, float, str]]:
+        cut = now_ms - BSKY_WINDOW_MS
+        with self.lock:
+            self.seen = [s for s in self.seen if s[0] >= cut]
+            seen = list(self.seen)
+        counts: dict[tuple[str, str], int] = {}
+        for _, kind, key in seen:
+            counts[(kind, key)] = counts.get((kind, key), 0) + 1
+        return [(kind, key, float(n), "") for (kind, key), n in counts.items()]
+
+
+def bluesky_thread(counter: BlueskyCounter) -> None:
+    """Keep a Jetstream connection open in the background; reconnect on any error."""
+    import asyncio
+    import threading
+
+    import websockets
+
+    async def listen() -> None:
+        while True:
+            try:
+                async with websockets.connect(JETSTREAM, max_size=2**22) as ws:
+                    async for msg in ws:
+                        rec = json.loads(msg).get("commit", {}).get("record") or {}
+                        if text := rec.get("text"):
+                            counter.add(text, int(time.time() * 1000))
+            except Exception as e:
+                print(f"bluesky: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                await asyncio.sleep(30)
+
+    threading.Thread(target=lambda: asyncio.run(listen()), daemon=True).start()
+
+
 def parse_wiki(day) -> list[tuple[str, str, float, str]]:
     rows = []
     for article, rank in wiki_top(day).select("article", "rank").iter_rows():
@@ -121,12 +280,12 @@ def parse_wiki(day) -> list[tuple[str, str, float, str]]:
 def update(state: dict, rows: list[tuple[str, str, float, str]], now_ms: int) -> dict:
     """Fold a snapshot into the state: mints and keywords -> {kind: [value, last seen]}."""
     for kind, key, value, _ in rows:
-        bucket = "mints" if kind in ("dex_boosts", "dex_profiles", "gt_trending") else "keywords"
+        bucket = "mints" if kind in MINT_SOURCES else "keywords"
         entry = state.setdefault(bucket, {}).setdefault(key, {})
         old = entry.get(kind)
         if kind == "dex_boosts":
             value = max(value, old[0]) if old else value  # totalAmount is cumulative
-        elif kind in ("gt_trending", "google_trends", "wiki_top") and old:
+        elif kind in ("gt_trending", "google_trends", "wiki_top", "cg_trending") and old:
             value = min(value, old[0])  # best rank seen
         entry[kind] = [value, now_ms]
     cut = now_ms - KEEP_MS
@@ -173,10 +332,24 @@ def write_state(state: dict, path: Path = NOW_PATH) -> None:
     tmp.replace(path)
 
 
+PARSERS = {
+    "dex_boosts": lambda raw: parse_dex(raw, "dex_boosts"),
+    "dex_profiles": lambda raw: parse_dex(raw, "dex_profiles"),
+    "dex_takeovers": lambda raw: parse_dex(raw, "dex_takeovers"),
+    "gt_trending": parse_gt,
+    "google_trends": parse_google,
+    "cg_trending": parse_cg,
+    "biz": parse_biz,
+}
+
+
 def run(path: Path = NOW_PATH) -> None:
     """Poll every source on its own schedule until stopped; a failed poll is retried."""
     state: dict = json.loads(path.read_text()) if path.exists() else {}
-    due = {name: 0.0 for name in [*SOURCES, "wiki_top"]}
+    due = {name: 0.0 for name in [*SOURCES, "wiki_top", "bluesky"]}
+    counter = BlueskyCounter()
+    bluesky_thread(counter)
+    biz_spikes = Spikes("biz_spike")
     print("social collector started", flush=True)
     while True:
         now = time.time()
@@ -184,19 +357,18 @@ def run(path: Path = NOW_PATH) -> None:
         for name, at in due.items():
             if now < at:
                 continue
-            every = WIKI_EVERY_S if name == "wiki_top" else SOURCES[name][1]
+            every = {"wiki_top": WIKI_EVERY_S, "bluesky": BSKY_EVERY_S}.get(name)
+            every = every or SOURCES[name][1]
             try:
                 if name == "wiki_top":
                     rows = parse_wiki((datetime.now(UTC) - timedelta(days=1)).date())
+                elif name == "bluesky":
+                    rows = counter.rows(int(time.time() * 1000))
                 else:
-                    raw = _get(SOURCES[name][0])
-                    rows = (
-                        parse_dex(raw, name)
-                        if name.startswith("dex_")
-                        else parse_gt(raw)
-                        if name == "gt_trending"
-                        else parse_google(raw)
-                    )
+                    rows = PARSERS[name](_get(SOURCES[name][0]))
+                if name == "biz":  # keep mints and tickers; words only when they spike
+                    words = {k: v for kind, k, v, _ in rows if kind == "biz_word"}
+                    rows = [r for r in rows if r[0] != "biz_word"] + biz_spikes.update(words)
             except Exception as e:  # network or format trouble: log, retry in a minute
                 print(f"{name}: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
                 due[name] = now + 60
@@ -256,7 +428,21 @@ def report(root: Path) -> str:
         )
         .drop_nulls("social")
     )
-    kinds = ["any", "dex_boosts", "dex_profiles", "gt_trending", "google_trends", "wiki_top"]
+    kinds = [
+        "any",
+        "dex_boosts",
+        "dex_profiles",
+        "dex_takeovers",
+        "gt_trending",
+        "cg_trending",
+        "google_trends",
+        "wiki_top",
+        "biz_mint",
+        "biz_ticker",
+        "biz_spike",
+        "bsky_mint",
+        "bsky_ticker",
+    ]
     for k in kinds:
         j = j.with_columns(pl.col("social").str.json_path_match(f"$.{k}").is_not_null().alias(k))
     lines += [

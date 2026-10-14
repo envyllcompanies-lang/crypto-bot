@@ -41,3 +41,45 @@ def test_signals_match_mint_name_and_ticker():
     }  # fmt: skip
     assert social.signals(st, "other", "zzz", "") == {"loaded": True, "any": False}
     assert social.signals(None, "M", "", "") == {"loaded": False}
+
+
+def test_biz_counts_mints_tickers_and_words_across_4chan_word_breaks():
+    mint = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+    catalog = json.dumps(
+        [
+            {
+                "threads": [
+                    {"sub": "pepe", "com": f"{mint[:20]}<wbr>{mint[20:]} buy $FOOD",
+                     "last_replies": [{"com": "foodpepe &amp; $FOOD"}]},
+                    {"com": "foodpepe again"},
+                ]
+            }
+        ]
+    ).encode()  # fmt: skip
+    rows = {(k, key): v for k, key, v, _ in social.parse_biz(catalog)}
+    assert rows[("biz_mint", mint)] == 1
+    assert rows[("biz_ticker", "food")] == 2
+    assert rows[("biz_word", "foodpepe")] == 2
+
+
+def test_spikes_flag_only_words_far_above_their_baseline():
+    sp = social.Spikes("biz_spike", alpha=0.5, warmup=2)
+    for _ in range(3):
+        assert sp.update({"because": 40.0}) == []
+    rows = sp.update({"because": 41.0, "foodpepe": 6.0})
+    assert [r[1] for r in rows] == ["foodpepe"]
+
+
+def test_bluesky_counter_keeps_the_last_hour():
+    c = social.BlueskyCounter()
+    c.add("$PEPE to the moon", 0)
+    c.add("$pepe again", social.BSKY_WINDOW_MS)
+    assert c.rows(social.BSKY_WINDOW_MS + 1) == [("bsky_ticker", "pepe", 1.0, "")]
+
+
+def test_coingecko_trending_names_and_tickers_become_keywords():
+    raw = json.dumps({"coins": [{"item": {"name": "Astronaut", "symbol": "ASTRO"}}]}).encode()
+    assert sorted(social.parse_cg(raw)) == [
+        ("cg_trending", "astro", 1.0, "Astronaut"),
+        ("cg_trending", "astronaut", 1.0, "Astronaut"),
+    ]

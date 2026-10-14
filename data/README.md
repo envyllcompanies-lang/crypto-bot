@@ -86,9 +86,13 @@ Hugging Face search, so it is either private or deleted. Slinky21 replaces it.
 ## Social signals (ours, live, from 14 Oct 2026)
 
 - **Source:** `uv run python -m cryptobot.social run` (crypto-bot-social.service) polls
-  free public APIs: DexScreener token boosts and profiles (every 2 min), GeckoTerminal
-  trending Solana pools (5 min), the Google Trends daily RSS feed for the US (15 min) and
-  Wikipedia's top English articles for the previous day (6 h, the official pageview API).
+  free public APIs: DexScreener token boosts and profiles (every 2 min) and community
+  takeovers (5 min), GeckoTerminal trending Solana pools (5 min), CoinGecko trending
+  searches (10 min), the Google Trends daily RSS feed for the US (15 min), the 4chan /biz/
+  catalog (official read-only API, 1 min), Bluesky's Jetstream post stream (counts over
+  the last hour, every 5 min) and Wikipedia's top English articles for the previous day
+  (6 h, the official pageview API). Sources and why others were left out:
+  `reports/2026-10-14-social-sources.md`.
 - **What:** every snapshot as `data/live/social/<source>/<UTC date>/<ms>.parquet` (kind,
   key, value, text, received_ms), deleted after `CRYPTOBOT_KEEP_DAYS`; the current state
   in `data/derived/social_now.json`, which the paper trader records in each run's
