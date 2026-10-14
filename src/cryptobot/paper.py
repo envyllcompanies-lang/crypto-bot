@@ -78,6 +78,8 @@ from cryptobot.holders import LOOKUP_SCHEMA, PUBLIC_RPC, TOP_N, LookupWorker, cl
 from cryptobot.narrative import make_judge
 from cryptobot.recorder import LIVE, PUBLIC_WS, SCHEMAS, Sink, next_seq, now_ms, record
 from cryptobot.replay import TICK_MS, Buy, FillConfig, Position, Sell, TradeResult, View
+from cryptobot.social import NOW_PATH as SOCIAL_NOW
+from cryptobot.social import signals as social_signals
 from cryptobot.tracked import TRACKED_PATH, load_list, load_top
 from cryptobot.v1 import (
     FINAL_STRETCH_MAX_AGE_MS,
@@ -156,12 +158,21 @@ CREATORS_SCHEMA = {
     "graduated": pl.List(pl.Int64),
     "last_launch_ms": pl.List(pl.Int64),
 }
+SOCIAL_SCHEMA = {
+    "seq": pl.UInt64,
+    "received_ms": pl.Int64,
+    "event_index": pl.UInt16,
+    "list_mtime_ms": pl.Int64,
+    "state": pl.Utf8,  # social.py's current state, as JSON
+}
 EVENT_SCHEMAS = {
     **SCHEMAS,
     "lookups": LOOKUP_SCHEMA,
     "tracked": TRACKED_SCHEMA,
     "creators": CREATORS_SCHEMA,
+    "social": SOCIAL_SCHEMA,
 }
+SOCIAL_POLL_MS = 300_000  # the collector rewrites its file every 2 minutes
 TRACKED_POLL_MS = 60_000
 
 
@@ -271,6 +282,8 @@ class Engine:
         self.leaders: frozenset[str] | None = None
         # Late-curve universes: tokens whose curve already crossed the universe's cut-off.
         self.late_crossed: set[tuple[str, str]] = set()
+        # Social and attention signals (social.py); None until a state file is loaded.
+        self.social: dict | None = None
         # Creator records (creators.py): creator -> (launches, graduated, last launch ms).
         self.creators: dict[str, tuple[int, int, int]] | None = None
         self.creator_launches: dict[str, int] = {}  # creator -> newest launch seen live
@@ -403,6 +416,12 @@ class Engine:
         self.leaders = frozenset(top) if top else None
         self.stats["tracked_lists"] += 1
 
+    def on_social(self, row: dict) -> None:
+        """A social-signal state took effect (loaded live, or replayed)."""
+        self._advance(row["received_ms"])
+        self.social = json.loads(row["state"])
+        self.stats["social_states"] += 1
+
     def on_lookup(self, row: dict) -> None:
         """A recorded or live answer to a lookup request."""
         self._advance(row["received_ms"])
@@ -513,6 +532,8 @@ class Engine:
                 features["lookup_checks"] = classify(result, lookup_ms)
             if self.tracked is not None:
                 features["tracked_holders"] = tok.tracked_holders(self.tracked)
+            # Logged only, not traded on (CLAUDE.md "Social data"); social.report measures it.
+            features["social"] = social_signals(self.social, tok.mint, tok.name, tok.symbol)
             if u.kind == "conviction":
                 features["conviction"] = (
                     conv.describe() if conv else {"blocks": blocks(tok, result, lookup_ms, ts)}
@@ -884,6 +905,7 @@ def recorded_events(root: Path = LIVE) -> Iterator[tuple[str, dict | int]]:
         ("lookup", "lookups"),
         ("tracked", "tracked"),
         ("creators", "creators"),
+        ("social", "social"),
     )
     for kind, table in tables:
         df = read_table(root, table)
@@ -925,6 +947,9 @@ def run_replay(engine: Engine, root: Path = LIVE) -> None:
         elif kind == "creators":
             assert isinstance(item, dict)
             engine.on_creators(item)
+        elif kind == "social":
+            assert isinstance(item, dict)
+            engine.on_social(item)
         elif kind == "create":
             assert isinstance(item, dict)
             engine.on_create(item)
@@ -938,6 +963,7 @@ class _FileFeed:
     """Loads a nightly file when it changes and records each load with the run's events."""
 
     table = ""
+    poll_ms = TRACKED_POLL_MS
 
     def __init__(self, engine: Engine, sink: Sink, path: Path) -> None:
         self.engine, self.sink, self.path = engine, sink, path
@@ -945,7 +971,7 @@ class _FileFeed:
         self.checked_ms: int | None = None
 
     def poll(self, ts: int) -> None:
-        if self.checked_ms is not None and ts - self.checked_ms < TRACKED_POLL_MS:
+        if self.checked_ms is not None and ts - self.checked_ms < self.poll_ms:
             return
         self.checked_ms = ts
         try:
@@ -987,6 +1013,27 @@ class TrackedFeed(_FileFeed):
     def apply(self, row: dict) -> None:
         self.engine.on_tracked(row)
         print(f"tracked-wallet list loaded: {len(row['wallets'])} wallets", flush=True)
+
+
+class SocialFeed(_FileFeed):
+    """Social and attention signals (social.py's state file), checked every 5 minutes."""
+
+    table = "social"
+    poll_ms = SOCIAL_POLL_MS
+
+    def __init__(self, engine: Engine, sink: Sink, path: Path = SOCIAL_NOW) -> None:
+        super().__init__(engine, sink, path)
+
+    def read(self) -> dict | None:
+        try:
+            text = self.path.read_text()
+            json.loads(text)
+        except (FileNotFoundError, ValueError):
+            return None
+        return {"state": text}
+
+    def apply(self, row: dict) -> None:
+        self.engine.on_social(row)
 
 
 class CreatorFeed(_FileFeed):
@@ -1031,7 +1078,7 @@ def run_live(engine: Engine, minutes: float | None, events_dir: Path) -> None:
     )
     engine.holder_checks = True
     engine.request_lookup = worker.request
-    feeds = [TrackedFeed(engine, sink), CreatorFeed(engine, sink)]
+    feeds = [TrackedFeed(engine, sink), CreatorFeed(engine, sink), SocialFeed(engine, sink)]
     for feed in feeds:
         feed.poll(now_ms())
 

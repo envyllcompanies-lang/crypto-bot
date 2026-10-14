@@ -4,7 +4,8 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-for unit in crypto-bot.service crypto-bot-daily.service crypto-bot-daily.timer \
+for unit in crypto-bot.service crypto-bot-social.service \
+    crypto-bot-daily.service crypto-bot-daily.timer \
     crypto-bot-snapshot.service crypto-bot-snapshot.timer \
     crypto-bot-update.service crypto-bot-update.timer; do
   sed -e "s|@USER@|$USER|g" -e "s|@DIR@|$DIR|g" "$DIR/deploy/$unit" \
@@ -19,3 +20,4 @@ swapon --show=NAME --noheadings | grep -q . || sudo swapon /swapfile || true
 sudo systemctl daemon-reload
 sudo systemctl enable -q --now crypto-bot-daily.timer crypto-bot-update.timer crypto-bot-snapshot.timer
 sudo systemctl enable -q crypto-bot.service
+sudo systemctl enable -q --now crypto-bot-social.service

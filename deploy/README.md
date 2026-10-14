@@ -63,6 +63,14 @@ This installs uv, Python 3.12 and the pinned packages, then runs the tests. It a
 | Follow the backtest | `journalctl -u crypto-bot-backtest -f` |
 | Backtest report | `cd ~/crypto-bot && .venv/bin/python -m cryptobot.m6_report data/backtest/<folder>` |
 
+
+Social signals (`crypto-bot-social.service`, free public APIs, logged but not traded on):
+
+```
+sudo systemctl status crypto-bot-social --no-pager
+.venv/bin/python -m cryptobot.social report
+```
+
 ## Optional: reports pushed to GitHub
 
 To read the reports on GitHub (on the `paper-results` branch) instead of logging in. Once

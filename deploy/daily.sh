@@ -43,5 +43,12 @@ echo "report: $REPORT"
 find data/paper -mindepth 4 -maxdepth 4 -type d -path '*/events/*' -name '20??-??-??' \
   -mtime +"$KEEP_DAYS" -exec rm -rf {} + 2>/dev/null || true
 
+# Social snapshots (social.py): data/live/social/<source>/<date>.
+find data/live/social -mindepth 2 -maxdepth 2 -type d -name '20??-??-??' \
+  -mtime +"$KEEP_DAYS" -exec rm -rf {} + 2>/dev/null || true
+
+SOCIAL_REPORT="data/reports/$DAY-social.md"
+nice -n 10 "$PYTHON" -m cryptobot.social report > "$SOCIAL_REPORT" || rm -f "$SOCIAL_REPORT"
+
 bash "$DIR/deploy/push.sh" reports "Paper trading report $DAY" \
-  "$REPORT" "$TRACKED_REPORT" "$CREATORS_REPORT" "$LABELS_REPORT"
+  "$REPORT" "$TRACKED_REPORT" "$CREATORS_REPORT" "$LABELS_REPORT" "$SOCIAL_REPORT"

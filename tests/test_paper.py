@@ -489,3 +489,20 @@ def test_quick_hold_needs_the_cross_inside_its_age_window_and_sells_a_minute_lat
     sells = inside.filter(inside["kind"] == "signal_sell")
     assert sells.height == 2
     assert all(r == "stall" for r in sells["reason"].to_list())
+
+
+def test_gate_records_carry_the_social_signals(tmp_path):
+    import json
+
+    from cryptobot.v1 import late_variants
+
+    eng = Engine(late_variants()[:1], out=Sink(tmp_path, OUT_SCHEMAS))
+    state = {"mints": {MINT: {"dex_boosts": [20.0, 0]}}, "keywords": {}, "updated_ms": 0}
+    eng.on_social({"received_ms": 0, "state": json.dumps(state)})
+    eng.on_create(create_row())
+    for row in late_tape().rows:
+        eng.on_trade(row)
+    eng.finish()
+    gates = read_table(tmp_path, "gates")
+    social = json.loads(gates["features"][0])["social"]
+    assert social == {"loaded": True, "dex_boosts": 20.0, "any": True}

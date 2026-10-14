@@ -83,6 +83,24 @@ Hugging Face search, so it is either private or deleted. Slinky21 replaces it.
 - **Fetch:** `uv run python -m cryptobot.recorder [--minutes N]`; check it with
   `uv run python -m cryptobot.m5_report`.
 
+## Social signals (ours, live, from 14 Oct 2026)
+
+- **Source:** `uv run python -m cryptobot.social run` (crypto-bot-social.service) polls
+  free public APIs: DexScreener token boosts and profiles (every 2 min), GeckoTerminal
+  trending Solana pools (5 min), the Google Trends daily RSS feed for the US (15 min) and
+  Wikipedia's top English articles for the previous day (6 h, the official pageview API).
+- **What:** every snapshot as `data/live/social/<source>/<UTC date>/<ms>.parquet` (kind,
+  key, value, text, received_ms), deleted after `CRYPTOBOT_KEEP_DAYS`; the current state
+  in `data/derived/social_now.json`, which the paper trader records in each run's
+  `events/social` table.
+- **Licence:** each provider's API terms; not redistributed.
+
+## Wikipedia top articles (cached)
+
+- `data/derived/attention/wiki_top_<date>.parquet`: each UTC day's top 1,000 English
+  Wikipedia articles from the Wikimedia pageview API (free; CC0 data), fetched by
+  `attention.py` with a descriptive User-Agent at one request per day of data.
+
 ## Paper trading runs (ours, M6)
 
 - **Source:** `uv run python -m cryptobot.paper live [--minutes N]` (live stream) or

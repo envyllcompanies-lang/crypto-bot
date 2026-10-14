@@ -1,0 +1,18 @@
+[Unit]
+Description=crypto-bot social collector (free public APIs: DexScreener, GeckoTerminal, Google Trends RSS, Wikipedia)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=@USER@
+WorkingDirectory=@DIR@
+ExecStart=@DIR@/.venv/bin/python -m cryptobot.social run
+Restart=always
+RestartSec=30
+# Small: a few HTTP polls a minute and a JSON state file. Capped so it can never crowd
+# out the paper trader on the 1 GB machine.
+MemoryHigh=120M
+MemoryMax=160M
+
+[Install]
+WantedBy=multi-user.target
