@@ -44,6 +44,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
+from cryptobot import pumpswap
 from cryptobot.costs import DIRECT, TERMINAL_REFERRAL, TOKEN_ACCOUNT_RENT_LAMPORTS, Venue
 from cryptobot.curve import (
     CURVE_SALE_TOKENS,
@@ -148,11 +149,14 @@ def simulate(
     p: Params = DEFAULT_PARAMS,
     starts: list[tuple[str, int]] | None = None,
     leader_sell: np.ndarray | None = None,
+    pool: pumpswap.Pool | None = None,
 ) -> list[tuple]:
     """Every (entry, exit, venue) trade on one token: rows for `columns()`.
 
     `starts` replaces the entry rules with given (name, decision index) pairs, and
-    `leader_sell` marks the trades where a followed wallet sold (copy trading).
+    `leader_sell` marks the trades where a followed wallet sold (copy trading). `pool` is
+    the token's PumpSwap pool after graduation (pumpswap.load); with it, a position open
+    when the curve completes is sold into the pool instead of at the final curve price.
     """
     n = ts.size
     if n == 0:
@@ -200,6 +204,7 @@ def simulate(
                         created_ms,
                         float(prog[j]),
                         leader_sell,
+                        pool,
                     )
                 )
     return out
@@ -232,7 +237,8 @@ def moved_path(
 
 
 def _exit_row(name, x, venue, p, ts, grad, n, i, land_buy, tokens, cost, entry_price, after,
-              s_path, t_path, created_ms, entry_progress, leader_sell=None) -> tuple:  # fmt: skip
+              s_path, t_path, created_ms, entry_progress, leader_sell=None,
+              pool=None) -> tuple:  # fmt: skip
     """Find the exit decision on the path after our buy, then fill it."""
     base = int(np.searchsorted(ts, land_buy, side="right"))  # first trade after our buy
     high0 = after.price()
@@ -270,6 +276,19 @@ def _exit_row(name, x, venue, p, ts, grad, n, i, land_buy, tokens, cost, entry_p
     flag = ""
     if grad < n and jj >= grad:
         jj, flag, why = grad, "graduated", "graduated"
+        if pool is not None:
+            # The curve can't be traded once complete; sell into the new pool. A pure
+            # time exit keeps holding until its time is up; every other exit sells as soon
+            # as it can after graduation.
+            hold = not x.leader and all(v is None for v in (x.target, x.stop, x.trail, x.ride))
+            land = (decided if hold else int(ts[grad])) + p.delay_ms
+            sol, tok, pts, ps, pt = pool
+            reserves = pumpswap.state_at(sol, tok, pts, ps, pt, land)
+            gross = pumpswap.sell_into(*reserves, tokens, venue.fee_bps_per_side)
+            proceeds = gross + p.rent_lamports
+            return (name, x.name, venue.name, created_ms, int(ts[i]), land_buy, land, why,
+                    "graduated_pool", cost, proceeds, (proceeds - cost) / cost,
+                    entry_progress)  # fmt: skip
     m = jj - base  # position in the moved path; -1 is the state right after our buy
     state = after if m < 0 else Curve(int(s_path[m]), int(t_path[m]))
     _, gross = state.after_sell(tokens)
@@ -330,7 +349,8 @@ def _classic_creates(path: Path) -> pl.DataFrame:
 
 def _chunk(args: tuple) -> int:
     """Simulate one create file's tokens into out/part-<k>.parquet; skip if it exists."""
-    k, chunks, p, out, timing = args
+    k, chunks, p, out, timing, pool_fills = args
+    pools = _pools() if pool_fills else {}
     os.environ.setdefault("POLARS_MAX_THREADS", "1")
     _, create_path, _ = chunks[k]
     part = out / f"part-{k:03d}.parquet"
@@ -368,11 +388,25 @@ def _chunk(args: tuple) -> int:
             continue
         mint = mints[a]
         grid = (TIMING_ENTRIES, TIMING_EXITS, TIMING_VENUES) if timing else (ENTRIES, EXITS, VENUES)
-        for r in simulate(ts[a:b], vsol[a:b], vtok[a:b], created[mint], *grid, p=p):
+        rows_ = simulate(
+            ts[a:b], vsol[a:b], vtok[a:b], created[mint], *grid, p=p, pool=pools.get(mint)
+        )
+        for r in rows_:
             rows.append((mint, *r))
     print(f"{create_path.name}: {len(created):,} launches, {len(rows):,} trades", flush=True)
     write_part(rows, part)
     return len(rows)
+
+
+_POOLS: dict | None = None
+
+
+def _pools() -> dict:
+    """Post-graduation pools (pumpswap.load), loaded once per worker process."""
+    global _POOLS
+    if _POOLS is None:
+        _POOLS = pumpswap.load()
+    return _POOLS
 
 
 def write_part(rows: list[tuple], part: Path) -> None:
@@ -392,13 +426,14 @@ def run(
     root: Path = SLINKY_ROOT,
     p: Params = DEFAULT_PARAMS,
     timing: bool = False,
+    pool_fills: bool = False,
 ) -> int:
     """Every create file into its own part under `out`; a rerun resumes where it stopped."""
     chunks = files(root)
     out.mkdir(parents=True, exist_ok=True)
     ctx = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(jobs, mp_context=ctx) as pool:
-        work = [(k, chunks, p, out, timing) for k in range(len(chunks))]
+        work = [(k, chunks, p, out, timing, pool_fills) for k in range(len(chunks))]
         counts = list(pool.map(_chunk, work))
     return sum(c for c in counts if c > 0)
 
@@ -588,6 +623,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--report", type=Path, help="write the report for this result file")
     parser.add_argument("--pools", action="store_true", help="post-graduation pool summary")
     parser.add_argument("--timing", action="store_true", help="the timing map grid")
+    parser.add_argument(
+        "--pool-fills",
+        action="store_true",
+        help="sell positions open at graduation into the PumpSwap pool (pumpswap.py)",
+    )
     args = parser.parse_args(argv)
     if args.pools:
         print(pools_summary())
@@ -599,7 +639,13 @@ def main(argv: list[str] | None = None) -> None:
         else:
             print(report(df, delay_ms=args.delay_ms))
         return
-    rows = run(args.out, args.jobs, p=Params(delay_ms=args.delay_ms), timing=args.timing)
+    rows = run(
+        args.out,
+        args.jobs,
+        p=Params(delay_ms=args.delay_ms),
+        timing=args.timing,
+        pool_fills=args.pool_fills,
+    )
     print(f"{args.out}: {rows:,} new rows")
     print(f"report: uv run python -m cryptobot.screen --report {args.out}")
 
