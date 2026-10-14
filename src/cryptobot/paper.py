@@ -1054,6 +1054,7 @@ def main(argv: list[str] | None = None) -> None:
     source = run_dir / "events" if args.mode == "live" else args.events
     engine.summary_path = run_dir / "summary.json"
     engine.summary_extra = {"mode": args.mode, "source": str(source), "running": True}
+    engine.keep_results = False  # runs for days: closed trades are on disk, not in memory
     if args.mode == "live":
         run_live(engine, args.minutes, source)
     else:
