@@ -41,6 +41,7 @@ from cryptobot.recorder import Sink
 from cryptobot.slinky import SLINKY_ROOT, events, files
 from cryptobot.v1 import (
     default_variants,
+    full_grid,
     new_pairs_variants,
     scalp_variants,
     stretch_variants,
@@ -49,6 +50,7 @@ from cryptobot.v1 import (
 
 GRIDS = {
     "default": default_variants,
+    "full": full_grid,
     "scalp": scalp_variants,
     "trail": trail_variants,
     "stretch": stretch_variants,

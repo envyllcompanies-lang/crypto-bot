@@ -468,3 +468,71 @@ def test_labels_measure_tokens_that_conviction_blocks_for_clustered_funding():
     assert blocks(tok, BUNDLE, 4_000, NOW) == ["funding_clustered"]
     assert conviction(tok, BUNDLE, 4_000, NOW) is None
     assert conviction(tok, BUNDLE, 4_000, NOW, measure_only=True) is not None
+
+
+def _elite_token(**over):
+    from types import SimpleNamespace
+
+    base = dict(
+        copycat=False,
+        bundle_candle=False,
+        dev_share=0.0,
+        insider_share=0.1,
+        early_buyer_share=0.1,
+        creator_recent_launch=None,
+        largest_holder=lambda: ("w", 0.03),
+    )
+    return SimpleNamespace(**(base | over))
+
+
+def test_elite_rule_passes_only_clean_tokens():
+    from cryptobot.conviction import elite_misses
+
+    assert elite_misses(_elite_token(), CLEAN, thesis=False) == []
+    bad = _elite_token(copycat=True, dev_share=0.08, largest_holder=lambda: ("w", 0.09))
+    assert elite_misses(bad, CLEAN, thesis=False) == ["copycat", "dev_share", "largest_holder"]
+    assert elite_misses(_elite_token(creator_recent_launch=True), CLEAN, False) == [
+        "serial_launcher"
+    ]
+
+
+def test_elite_thesis_waits_for_the_verdict_then_needs_4_plus_and_no_flags():
+    from cryptobot.conviction import elite_gate, elite_misses
+
+    tok = _elite_token()
+    assert elite_misses(tok, CLEAN, thesis=True) == ["waiting"]
+    judged = CLEAN | {"narrative_done": True}
+    good = judged | {"narrative": {"score": 4, "red_flags": []}}
+    assert elite_misses(tok, good, thesis=True) == []
+    flagged = judged | {"narrative": {"score": 5, "red_flags": ["copycat"]}}
+    assert elite_misses(tok, flagged, thesis=True) == ["narrative_red_flags"]
+    tweet = good | {"x_kind": "tweet"}
+    assert elite_misses(tok, tweet, thesis=True) == ["x_not_community"]
+    conv = conviction(clean_token(), CLEAN, 4_000, NOW)
+    assert (elite_gate(conv, tok, good, True).tier, elite_gate(conv, tok, good, True).drop) == (
+        "elite",
+        0.0,
+    )
+    waiting = elite_gate(conv, tok, CLEAN, True)
+    assert (waiting.tier, waiting.drop, waiting.misses) == ("waiting_narrative", None, ("waiting",))
+
+
+def test_elite_never_trades_offline():
+    from cryptobot.conviction import OFFLINE, elite_misses
+
+    assert elite_misses(_elite_token(), OFFLINE, thesis=False) == ["no_live_lookup"]
+
+
+def test_elite_runs_in_the_engine_and_logs_why_a_token_was_skipped(tmp_path):
+    from cryptobot.v1 import elite_universe, exit_grid
+
+    var = exit_grid(elite_universe(), drops=(0.0,), exits=((0.05, 0.10, None),), shadow=False)[0]
+    eng = Engine([var], out=Sink(tmp_path, OUT_SCHEMAS))
+    eng.holder_checks = True
+    eng.request_lookup = lambda *args: None
+    feed(eng, dump_tape(), CLEAN)
+    eng.finish()
+    eng.flush()
+    assert read_table(tmp_path, "decisions") is None  # no buy: an early buyer holds >4%
+    verdict = eng.other_convictions["elite_onchain"]["Mint1111"]
+    assert verdict.tier == "skip" and "largest_holder" in verdict.misses

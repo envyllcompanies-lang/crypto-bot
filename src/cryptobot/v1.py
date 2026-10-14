@@ -74,6 +74,8 @@ class Universe:
     narrative_gate: bool = False  # conviction only: LLM narrative score caps the tier
     control: bool = False  # conviction only: a coin flip picks tokens, not the score
     labels: bool = False  # conviction only: every eligible token, entered at once
+    elite: bool = False  # conviction only: one strict rule (conviction.elite_misses)
+    thesis: bool = False  # elite only: also require a legit thesis
 
 
 ALL = Universe("all", "all", NEW_PAIRS_STAKE)
@@ -97,6 +99,12 @@ def conviction_universe(max_stake: int = MAX_STAKE, narrative_gate: bool = False
 
 def control_universe(max_stake: int = MAX_STAKE) -> Universe:
     return Universe("control_random", "conviction", min(NEW_PAIRS_STAKE, max_stake), control=True)
+
+
+def elite_universe(max_stake: int = MAX_STAKE, thesis: bool = False) -> Universe:
+    name = "elite_thesis" if thesis else "elite_onchain"
+    stake = min(NEW_PAIRS_STAKE, max_stake)
+    return Universe(name, "conviction", stake, elite=True, thesis=thesis)
 
 
 def labels_universe(max_stake: int = MAX_STAKE) -> Universe:
@@ -187,6 +195,8 @@ class Variant:
             "narrative_gate": self.universe.narrative_gate,
             "control": self.universe.control,
             "labels": self.universe.labels,
+            "elite": self.universe.elite,
+            "thesis": self.universe.thesis,
             "shadow": self.shadow,
             "stake_lamports": getattr(s, "stake_lamports", None),
             "drop": "conviction tier" if self.conviction else getattr(s, "drop", None),
@@ -259,12 +269,43 @@ def conviction_variant(
 LABEL_EXITS = ((0.45, 0.0), (0.05, 0.10), (0.10, 0.10))
 
 
+# Exits the conviction-kind wallets run (14 Oct 2026, the grid cut down): V1's own, and
+# the best scalp of the backtest.
+FOCUS_EXITS = ((0.45, 0.0), (0.05, 0.10))
+# Elite exits: the best scalp and the best trailing stop of the backtests.
+# (target or None, stop, trail or None)
+ELITE_EXITS = ((0.05, 0.10, None), (None, 0.10, 0.20))
+
+
 def default_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
-    """The grid run side by side, for New Pairs and each Final Stretch cut-off: every
-    entry x target x stop at a 2 s delay, plus V1's core rule at 1 s and 5 s delays,
-    with a 10-minute stall, and with the largest-holder-sells exit. Then the conviction
-    universe (ungated, narrative-gated, and the random control) with every target x stop
-    at a 2 s delay, and shadow labels variants with LABEL_EXITS."""
+    """What the paper trader runs (cut down on 14 Oct 2026, after the backtests found no
+    profitable variant in the full grid): V1's core rule in each V1 universe; the
+    conviction, narrative-gated and random-control universes with FOCUS_EXITS; the two
+    elite universes with ELITE_EXITS through Terminal and direct; and the shadow labels
+    variants with LABEL_EXITS. The full grid is still in `full_grid` for backtests."""
+    if max_stake > HARD_MAX_STAKE:
+        raise ValueError("max_stake is above the 1.5 SOL hard cap")
+    out = [variant(u, *CORE) for u in universes(max_stake)]
+    for u in (
+        conviction_universe(max_stake),
+        conviction_universe(max_stake, narrative_gate=True),
+        control_universe(max_stake),
+    ):
+        out += [conviction_variant(u, t, s) for t, s in FOCUS_EXITS]
+    for thesis in (False, True):
+        out += exit_grid(
+            elite_universe(max_stake, thesis), drops=(0.0,), exits=ELITE_EXITS, shadow=False
+        )
+    labels = labels_universe(max_stake)
+    out += [conviction_variant(labels, t, s, shadow=True) for t, s in LABEL_EXITS]
+    return out
+
+
+def full_grid(max_stake: int = MAX_STAKE) -> list[Variant]:
+    """The grid the paper trader ran until 14 Oct 2026, for backtests: every entry x
+    target x stop in each V1 universe at a 2 s delay, V1's core rule at 1 s and 5 s, with
+    a 10-minute stall and with the largest-holder-sells exit; the conviction-kind
+    universes with every target x stop; and the shadow labels variants."""
     if max_stake > HARD_MAX_STAKE:
         raise ValueError("max_stake is above the 1.5 SOL hard cap")
     out = []
@@ -363,12 +404,17 @@ def new_pairs_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
     return exit_grid(Universe("new_pairs", "new_pairs", min(NEW_PAIRS_STAKE, max_stake)))
 
 
-def exit_grid(u: Universe) -> list[Variant]:
-    """STRETCH_DROPS x STRETCH_EXITS x (Terminal, direct), as shadow variants on `u`."""
+def exit_grid(
+    u: Universe,
+    drops: tuple[float, ...] = STRETCH_DROPS,
+    exits: tuple = STRETCH_EXITS,
+    shadow: bool = True,
+) -> list[Variant]:
+    """drops x exits x (Terminal, direct) on `u`; shadow variants unless told otherwise."""
     out = []
     for venue in (TERMINAL_REFERRAL, DIRECT):
-        for drop in STRETCH_DROPS:
-            for target, stop, trail in STRETCH_EXITS:
+        for drop in drops:
+            for target, stop, trail in exits:
                 parts = [u.name, f"dip{round(drop * 100)}"]
                 parts.append(f"tp{round(target * 100)}" if target else f"trail{round(trail * 100)}")
                 parts += [f"sl{round(stop * 100)}", f"d{DEFAULT_DELAY_MS // 1000}s"]
@@ -385,5 +431,8 @@ def exit_grid(u: Universe) -> list[Variant]:
                     trail=trail,
                 )
                 fill = FillConfig(delay_ms=DEFAULT_DELAY_MS, venue=venue)
-                out.append(Variant("|".join(parts), u, strategy, fill, shadow=True))
+                conv = u.kind == "conviction"
+                out.append(
+                    Variant("|".join(parts), u, strategy, fill, conviction=conv, shadow=shadow)
+                )
     return out

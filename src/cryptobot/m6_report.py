@@ -289,7 +289,8 @@ def tier_section(trades: pl.DataFrame | None, conviction_universes: dict[str, st
     lines += ["| Universe | Tier | Trades | Win rate [95% CI] | Expectancy |"]
     lines += ["|---|---|---|---|---|"]
     for u in sorted(set(conviction_universes.values())):
-        for t in ("random",) if u == "control_random" else TIERS:
+        tiers = ("random",) if u == "control_random" else TIERS
+        for t in ("elite",) if u.startswith("elite") else tiers:
             lines.append(f"| {u} | {t} | {_outcome_cells(found.get((u, t)))} |")
     return [*lines, ""]
 

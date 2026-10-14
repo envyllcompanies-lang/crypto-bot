@@ -65,6 +65,7 @@ from cryptobot.conviction import (
     blocks,
     control_pick,
     conviction,
+    elite_gate,
     label_entry,
     narrative_gate,
 )
@@ -474,6 +475,9 @@ class Engine:
                 conv = control_pick(conv, tok.mint)
             elif conv is not None and u.labels:
                 conv = label_entry(conv)
+            elif conv is not None and u.elite:
+                assert result is not None
+                conv = elite_gate(conv, tok, result, u.thesis)
             if u.name == "conviction":
                 self.convictions[tok.mint] = conv
             else:

@@ -94,6 +94,7 @@ class Conviction:
     red_flags: tuple[str, ...] = ()
     shadow: dict = field(default_factory=dict)  # logged, never scored (the LLM narrative)
     narrative_cap: str | None = None  # narrative-gated universe only: the tier cap applied
+    misses: tuple[str, ...] = ()  # elite universes only: the parts of the rule that failed
 
     def describe(self) -> dict:
         return {
@@ -104,6 +105,7 @@ class Conviction:
             "red_flags": list(self.red_flags),
             "shadow": self.shadow,
             "narrative_cap": self.narrative_cap,
+            "misses": list(self.misses),
         }
 
 
@@ -234,3 +236,58 @@ def label_entry(conv: Conviction) -> Conviction:
     """Labels: enter every eligible token at once, whatever its score, so each one gets a
     measured outcome next to its features (the learned scorer's training data)."""
     return replace(conv, tier=LABEL, drop=0.0)
+
+
+# Elite (owner, 14 Oct 2026: "hone in on the best ones"): one strict rule instead of a
+# score. On-chain, the stage-one filters that cut the loss most in the 24 Sep-8 Oct
+# backtest (reports/2026-10-11-m3-labels.md), the live top-5 checks, and no serial
+# launcher. With `thesis`, also a legit thesis: an X community, a narrative the judge
+# rates 4-5 and no red flags (it then waits for the verdict). Enters at once.
+ELITE = "elite"
+ELITE_MAX_DEV, ELITE_MAX_INSIDERS = 0.05, 0.20
+ELITE_MAX_HOLDER, ELITE_MAX_EARLY_BUYERS = 0.04, 0.15
+ELITE_MIN_NARRATIVE = 4
+
+
+def elite_misses(tok: TokenState, result: dict, thesis: bool) -> list[str]:
+    """The elite rule's failed parts (empty = passes); "waiting" while the narrative
+    verdict a thesis rule needs has not arrived."""
+    out = []
+    if tok.copycat:
+        out.append("copycat")
+    if tok.bundle_candle:
+        out.append("bundle_candle")
+    if tok.dev_share > ELITE_MAX_DEV:
+        out.append("dev_share")
+    if tok.insider_share > ELITE_MAX_INSIDERS:
+        out.append("insider_share")
+    if tok.largest_holder()[1] > ELITE_MAX_HOLDER:
+        out.append("largest_holder")
+    if tok.early_buyer_share > ELITE_MAX_EARLY_BUYERS:
+        out.append("early_buyers")
+    if tok.creator_recent_launch:
+        out.append("serial_launcher")
+    if result.get("offline"):
+        out.append("no_live_lookup")  # elite needs the top-5 checks
+    elif balances_alike(result["balances"]):
+        out.append("top5_balances_alike")
+    if thesis:
+        if result.get("x_kind") != "community":
+            out.append("x_not_community")
+        if not result.get("narrative_done"):
+            out.append("waiting")
+        else:
+            narrative = result.get("narrative") or {}
+            if (narrative.get("score") or 0) < ELITE_MIN_NARRATIVE:
+                out.append("narrative_below_4")
+            if narrative.get("red_flags"):
+                out.append("narrative_red_flags")
+    return out
+
+
+def elite_gate(conv: Conviction, tok: TokenState, result: dict, thesis: bool) -> Conviction:
+    misses = elite_misses(tok, result, thesis)
+    if not misses:
+        return replace(conv, tier=ELITE, drop=0.0)
+    tier = WAITING if misses == ["waiting"] else SKIP
+    return replace(conv, tier=tier, drop=None, misses=tuple(misses))

@@ -33,9 +33,22 @@ def test_dollar_levels_use_v1_launch_price():
     assert FINAL_STRETCH_MIN_MULT == pytest.approx(8_000 / 4_500)
 
 
+def test_full_grid_is_kept_for_backtests():
+    from cryptobot.v1 import full_grid
+
+    grid = full_grid()
+    assert len(grid) == 4 * (4 * 3 * 2 + 4) + 3 * 3 * 2 + 3 == 133
+    assert len({v.name for v in grid}) == len(grid)
+
+
 def test_variant_grid_respects_sizes_and_cap():
     grid = default_variants()
-    assert len(grid) == 4 * (4 * 3 * 2 + 4) + 3 * 3 * 2 + 3 == 133
+    # V1's core rule x 4 universes, 3 conviction-kind x 2 exits, 2 elite x 2 exits x 2
+    # venues, 3 shadow labels.
+    assert len(grid) == 4 + 3 * 2 + 2 * 2 * 2 + 3 == 21
+    names = {v.name for v in grid}
+    assert "elite_thesis|dip0|tp5|sl10|d2s|direct" in names
+    assert "elite_onchain|dip0|trail20|sl10|d2s" in names
     assert len({v.name for v in grid}) == len(grid)
     assert all(v.strategy.stake_lamports <= MAX_STAKE for v in grid)
     stakes = {v.universe.kind: v.strategy.stake_lamports for v in grid}
