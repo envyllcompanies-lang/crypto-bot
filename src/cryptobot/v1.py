@@ -283,6 +283,7 @@ def conviction_variant(
 # Exits the shadow labels universe measures on every eligible token: V1's +45% with its
 # exit at entry, and the two best scalps of the 11 Oct backtest (+5% and +10%, -10% stop).
 LABEL_EXITS = ((0.45, 0.0), (0.05, 0.10), (0.10, 0.10))
+LABEL_PRIMARY = (0.05, 0.10)  # labels.PRIMARY_EXIT: the one labels exit the live grid keeps
 
 
 # Exits the conviction-kind wallets run (14 Oct 2026, the grid cut down): V1's own, and
@@ -326,13 +327,27 @@ def late_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
 
 
 def default_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
-    """What the paper trader runs (cut down on 14 Oct 2026, after the backtests found no
-    profitable variant in the full grid): V1's core rule in each V1 universe; the
-    conviction, narrative-gated and random-control universes with FOCUS_EXITS; the two
-    elite universes with ELITE_EXITS through Terminal and direct; and the shadow labels
-    variants with LABEL_EXITS. The full grid is still in `full_grid` for backtests."""
+    """What the paper trader runs (cut to 13 on 14 Oct 2026: every rule that had lost in
+    both the backtests and live paper trading was dropped, to trade far less): the two
+    elite universes with ELITE_EXITS through Terminal and direct (pre-registered test),
+    one shadow labels variant (LABEL_PRIMARY, the base rate the narrative-score and
+    filter reports use), and the late-curve test (`late_variants`). `full_grid` keeps the
+    old rules for backtests; `live_grid_14_oct` is the 25-variant grid this replaced."""
     if max_stake > HARD_MAX_STAKE:
         raise ValueError("max_stake is above the 1.5 SOL hard cap")
+    out = []
+    for thesis in (False, True):
+        out += exit_grid(
+            elite_universe(max_stake, thesis), drops=(0.0,), exits=ELITE_EXITS, shadow=False
+        )
+    labels = labels_universe(max_stake)
+    out.append(conviction_variant(labels, *LABEL_PRIMARY, shadow=True))
+    return out + late_variants(max_stake)
+
+
+def live_grid_14_oct(max_stake: int = MAX_STAKE) -> list[Variant]:
+    """The 25-variant live grid of 14 Oct 2026 (V1 core, conviction trio, elite, all
+    labels exits, late curve), kept for backtests (`--grid live14`)."""
     out = [variant(u, *CORE) for u in universes(max_stake)]
     for u in (
         conviction_universe(max_stake),

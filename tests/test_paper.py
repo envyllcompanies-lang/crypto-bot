@@ -328,9 +328,9 @@ def test_recorded_events_replay_like_live(tmp_path):
 def test_final_stretch_waits_for_a_complete_column(tmp_path):
     import json
 
-    from cryptobot.v1 import default_variants
+    from cryptobot.v1 import full_grid
 
-    stretch = [v for v in default_variants() if v.universe.name == "final_stretch_50"][:1]
+    stretch = [v for v in full_grid() if v.universe.name == "final_stretch_50"][:1]
     eng = Engine(stretch, out=Sink(tmp_path, OUT_SCHEMAS))
     eng.on_create(create_row())
     for row in bounce_tape().rows:

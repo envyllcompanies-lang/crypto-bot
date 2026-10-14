@@ -43,9 +43,8 @@ def test_full_grid_is_kept_for_backtests():
 
 def test_variant_grid_respects_sizes_and_cap():
     grid = default_variants()
-    # V1's core rule x 4 universes, 3 conviction-kind x 2 exits, 2 elite x 2 exits x 2
-    # venues, 3 shadow labels, 2 late-curve universes x 2 exits.
-    assert len(grid) == 4 + 3 * 2 + 2 * 2 * 2 + 3 + 2 * 2 == 25
+    # 2 elite x 2 exits x 2 venues, 1 shadow labels, 2 late-curve universes x 2 exits.
+    assert len(grid) == 2 * 2 * 2 + 1 + 2 * 2 == 13
     assert "late_p90_leader|tp25|sl15|d2s|direct" in names_of(grid)
     names = {v.name for v in grid}
     assert "elite_thesis|dip0|tp5|sl10|d2s|direct" in names
@@ -53,13 +52,18 @@ def test_variant_grid_respects_sizes_and_cap():
     assert len({v.name for v in grid}) == len(grid)
     assert all(v.strategy.stake_lamports <= MAX_STAKE for v in grid)
     stakes = {v.universe.kind: v.strategy.stake_lamports for v in grid}
-    assert stakes == {
-        "new_pairs": NEW_PAIRS_STAKE,
-        "final_stretch": FINAL_STRETCH_STAKE,
-        "conviction": NEW_PAIRS_STAKE,
-        "late": NEW_PAIRS_STAKE,
-    }
-    assert "conviction|tp45|sl0|d2s" in {v.name for v in grid}
+    assert stakes == {"conviction": NEW_PAIRS_STAKE, "late": NEW_PAIRS_STAKE}
+    assert "labels|tp5|sl10|d2s" in names
+
+
+def test_old_live_grid_is_kept_for_replays():
+    from cryptobot.v1 import live_grid_14_oct
+
+    grid = live_grid_14_oct()
+    assert len(grid) == 4 + 3 * 2 + 2 * 2 * 2 + 3 + 2 * 2 == 25
+    stakes = {v.universe.kind: v.strategy.stake_lamports for v in grid}
+    assert stakes["final_stretch"] == FINAL_STRETCH_STAKE
+    assert "conviction|tp45|sl0|d2s" in names_of(grid)
 
 
 def test_stakes_above_the_hard_cap_are_refused():

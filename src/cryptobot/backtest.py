@@ -42,6 +42,7 @@ from cryptobot.slinky import SLINKY_ROOT, events, files
 from cryptobot.v1 import (
     default_variants,
     full_grid,
+    live_grid_14_oct,
     new_pairs_variants,
     scalp_variants,
     stretch_variants,
@@ -51,6 +52,7 @@ from cryptobot.v1 import (
 GRIDS = {
     "default": default_variants,
     "full": full_grid,
+    "live14": live_grid_14_oct,
     "scalp": scalp_variants,
     "trail": trail_variants,
     "stretch": stretch_variants,
