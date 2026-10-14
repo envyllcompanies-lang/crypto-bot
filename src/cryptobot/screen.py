@@ -26,8 +26,8 @@ backtest makes it non-decreasing across all tokens; the difference is small).
 Trades inside one transaction keep their listed order (slinky.chain_order is skipped).
 Network costs are not included, as in the paper reports.
 
-Usage: uv run python -m cryptobot.screen [--jobs 4] [--out data/derived/screen.parquet]
-then:  uv run python -m cryptobot.screen --report data/derived/screen.parquet
+Usage: uv run python -m cryptobot.screen [--jobs 4] [--out data/derived/screen]
+then:  uv run python -m cryptobot.screen --report data/derived/screen
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ from cryptobot.curve import (
 )
 from cryptobot.slinky import SLINKY_ROOT, files
 
-OUT = SLINKY_ROOT.parent.parent / "derived" / "screen.parquet"
+OUT = SLINKY_ROOT.parent.parent / "derived" / "screen"  # one parquet part per create file
 MINUTE = 60_000
 FOLLOW_FILES = 2  # a token's trades are read from its create file and the next two (36 h)
 DISCOVERY_END = datetime(2026, 9, 24, tzinfo=UTC)  # rules are picked before, judged after
@@ -320,10 +320,14 @@ def _classic_creates(path: Path) -> pl.DataFrame:
     )
 
 
-def _chunk(args: tuple[int, list[tuple], Params]) -> pl.DataFrame:
-    k, chunks, p = args
+def _chunk(args: tuple[int, list[tuple], Params, Path]) -> int:
+    """Simulate one create file's tokens into out/part-<k>.parquet; skip if it exists."""
+    k, chunks, p, out = args
     os.environ.setdefault("POLARS_MAX_THREADS", "1")
     _, create_path, _ = chunks[k]
+    part = out / f"part-{k:03d}.parquet"
+    if part.exists():
+        return -1
     creates = _classic_creates(create_path)
     trade_paths = [c[2] for c in chunks[k : k + 1 + FOLLOW_FILES]]
     trades = (
@@ -358,20 +362,43 @@ def _chunk(args: tuple[int, list[tuple], Params]) -> pl.DataFrame:
         for r in simulate(ts[a:b], vsol[a:b], vtok[a:b], created[mint], p=p):
             rows.append((mint, *r))
     print(f"{create_path.name}: {len(created):,} launches, {len(rows):,} trades", flush=True)
-    return pl.DataFrame(rows, schema=["mint", *columns()], orient="row")
+    write_part(rows, part)
+    return len(rows)
 
 
-def run(out: Path, jobs: int, root: Path = SLINKY_ROOT, p: Params = DEFAULT_PARAMS) -> pl.DataFrame:
+def write_part(rows: list[tuple], part: Path) -> None:
+    """Rows to a parquet part, written under a temporary name and then renamed."""
+    df = pl.DataFrame(rows, schema=["mint", *columns()], orient="row")
+    tmp = part.with_suffix(".tmp")
+    df.write_parquet(tmp)
+    tmp.rename(part)
+
+
+def run(out: Path, jobs: int, root: Path = SLINKY_ROOT, p: Params = DEFAULT_PARAMS) -> int:
+    """Every create file into its own part under `out`; a rerun resumes where it stopped."""
     chunks = files(root)
+    out.mkdir(parents=True, exist_ok=True)
     ctx = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(jobs, mp_context=ctx) as pool:
-        parts = list(pool.map(_chunk, [(k, chunks, p) for k in range(len(chunks))]))
-    df = pl.concat([d for d in parts if d.height], how="vertical_relaxed")
-    # A token created in one file can't be in another's creates, but stay safe.
-    df = df.unique(["mint", "entry", "exit", "venue"], keep="first")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    df.write_parquet(out)
-    return df
+        counts = list(pool.map(_chunk, [(k, chunks, p, out) for k in range(len(chunks))]))
+    return sum(c for c in counts if c > 0)
+
+
+def load(out: Path) -> pl.DataFrame:
+    """The result parts, with only the columns the reports use, deduplicated.
+
+    Create files overlap a little at their edges, so a token can be simulated twice.
+    """
+    cols = ["mint", "entry", "exit", "venue", "created_ms", "exit_reason", "flag", "net_return"]
+    cat = ["entry", "exit", "venue", "exit_reason", "flag"]
+    return (
+        pl.scan_parquet(sorted(out.glob("part-*.parquet")))
+        .select(cols)
+        .with_columns(pl.col(cat).cast(pl.Categorical))
+        .unique(["mint", "entry", "exit", "venue"], keep="first")
+        .drop("mint")
+        .collect()
+    )
 
 
 # Report ------------------------------------------------------------------------------
@@ -511,10 +538,10 @@ def main(argv: list[str] | None = None) -> None:
         print(pools_summary())
         return
     if args.report:
-        print(report(pl.read_parquet(args.report)))
+        print(report(load(args.report)))
         return
-    df = run(args.out, args.jobs, p=Params(delay_ms=args.delay_ms))
-    print(f"{args.out}: {df.height:,} rows")
+    rows = run(args.out, args.jobs, p=Params(delay_ms=args.delay_ms))
+    print(f"{args.out}: {rows:,} new rows")
     print(f"report: uv run python -m cryptobot.screen --report {args.out}")
 
 

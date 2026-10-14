@@ -44,13 +44,14 @@ from cryptobot.screen import (
     _classic_creates,
     _pct,
     _summary,
-    columns,
+    load,
     simulate,
+    write_part,
 )
 from cryptobot.slinky import SLINKY_ROOT, files
 
 DERIVED = SLINKY_ROOT.parent.parent / "derived"
-OUT = DERIVED / "follow.parquet"
+OUT = DERIVED / "follow"
 LEADERS = DERIVED / "follow_leaders.parquet"
 MAX_AGE_MS = 60 * MINUTE
 TOP = 50
@@ -160,17 +161,21 @@ def follow_token(
     return rows
 
 
-def _chunk(args: tuple) -> pl.DataFrame:
+def _chunk(args: tuple) -> int:
     """One create file's tokens: `score` copies each candidate, `follow` runs the lists."""
-    k, chunks, lists, p, mode = args
+    k, chunks, lists, p, mode, out = args
     os.environ.setdefault("POLARS_MAX_THREADS", "1")
     _, create_path, _ = chunks[k]
+    part = out / f"part-{k:03d}.parquet"
+    if part.exists():
+        return -1
     cut = int(DISCOVERY_END.timestamp() * 1000)
     creates = _classic_creates(create_path)
     in_period = pl.col("created_ms") < cut if mode == "score" else pl.col("created_ms") >= cut
     creates = creates.filter(in_period)
     if creates.is_empty():
-        return pl.DataFrame()
+        write_part([], part)
+        return 0
     trade_paths = [c[2] for c in chunks[k : k + 1 + FOLLOW_FILES]]
     trades = (
         pl.scan_parquet(trade_paths)
@@ -217,17 +222,21 @@ def _chunk(args: tuple) -> pl.DataFrame:
             got = follow_token(*args_, lists, p)
         rows += [(mint, *r) for r in got]
     print(f"{create_path.name}: {len(created):,} launches, {len(rows):,} trades", flush=True)
-    return pl.DataFrame(rows, schema=["mint", *columns()], orient="row")
+    write_part(rows, part)
+    return len(rows)
 
 
-def _pool(jobs: int, root: Path, lists: dict, p: Params, mode: str) -> pl.DataFrame:
+def _pool(jobs: int, root: Path, lists: dict, p: Params, mode: str, out: Path) -> pl.DataFrame:
+    """Run every create file into parts under `out` (resumable), then load them."""
     chunks = files(root)
+    out.mkdir(parents=True, exist_ok=True)
     ctx = multiprocessing.get_context("spawn")
-    work = [(k, chunks, lists, p, mode) for k in range(len(chunks))]
+    work = [(k, chunks, lists, p, mode, out) for k in range(len(chunks))]
     with ProcessPoolExecutor(jobs, mp_context=ctx) as pool:
-        parts = list(pool.map(_chunk, work))
-    df = pl.concat([d for d in parts if d.height], how="vertical_relaxed")
-    return df.unique(["mint", "entry", "exit", "venue"], keep="first")
+        list(pool.map(_chunk, work))
+    return pl.read_parquet(sorted(out.glob("part-*.parquet"))).unique(
+        ["mint", "entry", "exit", "venue"], keep="first"
+    )
 
 
 def copyable(scores: pl.DataFrame, min_copied: int = MIN_COPIED) -> pl.DataFrame:
@@ -253,8 +262,8 @@ def run(out: Path, jobs: int, root: Path = SLINKY_ROOT, p: Params = DEFAULT_PARA
         build_leaders(root)
     board = pl.read_parquet(LEADERS)
     users = board.filter("tracked")["user"].to_list()
-    scores = _pool(jobs, root, {"candidates": frozenset(board["user"].to_list())}, p, "score")
-    scores.write_parquet(DERIVED / "follow_scores.parquet")
+    candidates = {"candidates": frozenset(board["user"].to_list())}
+    scores = _pool(jobs, root, candidates, p, "score", DERIVED / "follow_scores")
     good = copyable(scores)
     good.write_parquet(DERIVED / "follow_copyable.parquet")
     lists = {
@@ -265,9 +274,7 @@ def run(out: Path, jobs: int, root: Path = SLINKY_ROOT, p: Params = DEFAULT_PARA
     meta = json.loads(LEADERS.with_suffix(".json").read_text())
     meta |= {"copyable": good.height, "copied_in_discovery": scores.height}
     LEADERS.with_suffix(".json").write_text(json.dumps(meta, indent=1))
-    df = _pool(jobs, root, lists, p, "follow")
-    df.write_parquet(out)
-    return df
+    return _pool(jobs, root, lists, p, "follow", out)
 
 
 def report(df: pl.DataFrame, leaders: dict) -> str:
@@ -310,7 +317,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.report:
         meta = LEADERS.with_suffix(".json")
         leaders = json.loads(meta.read_text()) if meta.exists() else {}
-        print(report(pl.read_parquet(args.report), leaders))
+        print(report(load(args.report), leaders))
         return
     if args.leaders:
         board = build_leaders()
