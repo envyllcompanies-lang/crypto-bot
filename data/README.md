@@ -46,6 +46,13 @@ import or execute them.
   matches the curve formula to within 1 raw unit, and 30 of 30 sampled trades match
   the chain exactly.
 
+- **Post-graduation pools (`data/derived/pumpswap/`, 14 Oct 2026):** `uv run python -m
+  cryptobot.pumpswap --from 2026-09-01` streams the `graduate` table (all of it, 66,855
+  graduations) and the `swap` table (73 files for 1 Sep-8 Oct, about 2.3 GB each; each is
+  deleted once sliced). It keeps swaps of at least 0.01 SOL in pools that graduated, for
+  70 minutes after graduation: about 1.6M swaps per 12 hours, 1.5 GB in all. `screen.py
+  --pool-fills` sells positions open at graduation into these pools.
+
 ## loopholetape/pumpfun-launches (launch level)
 
 - **Source:** https://huggingface.co/datasets/loopholetape/pumpfun-launches

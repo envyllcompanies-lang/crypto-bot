@@ -350,7 +350,6 @@ def _classic_creates(path: Path) -> pl.DataFrame:
 def _chunk(args: tuple) -> int:
     """Simulate one create file's tokens into out/part-<k>.parquet; skip if it exists."""
     k, chunks, p, out, timing, pool_fills = args
-    pools = _pools() if pool_fills else {}
     os.environ.setdefault("POLARS_MAX_THREADS", "1")
     _, create_path, _ = chunks[k]
     part = out / f"part-{k:03d}.parquet"
@@ -376,6 +375,7 @@ def _chunk(args: tuple) -> int:
         .collect()
     )
     created = dict(creates.iter_rows())
+    pools = pumpswap.load(list(created)) if pool_fills else {}
     mints = trades["mint"].to_numpy()
     ts = trades["ts"].to_numpy()
     vsol = trades["virtual_sol_reserves"].to_numpy()
@@ -396,17 +396,6 @@ def _chunk(args: tuple) -> int:
     print(f"{create_path.name}: {len(created):,} launches, {len(rows):,} trades", flush=True)
     write_part(rows, part)
     return len(rows)
-
-
-_POOLS: dict | None = None
-
-
-def _pools() -> dict:
-    """Post-graduation pools (pumpswap.load), loaded once per worker process."""
-    global _POOLS
-    if _POOLS is None:
-        _POOLS = pumpswap.load()
-    return _POOLS
 
 
 def write_part(rows: list[tuple], part: Path) -> None:

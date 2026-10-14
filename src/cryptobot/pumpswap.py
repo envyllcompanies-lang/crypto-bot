@@ -139,12 +139,15 @@ def extract(start: datetime | None = None, out: Path = OUT) -> None:
 Pool = tuple[int, int, np.ndarray, np.ndarray, np.ndarray]
 
 
-def load(out: Path = OUT) -> dict[str, Pool]:
-    """Per graduated mint: (deposit lamports, deposit tokens, anchor times, SOL reserve,
-    token reserve)."""
+def load(mints: list[str] | None = None, out: Path = OUT) -> dict[str, Pool]:
+    """Per graduated mint (all, or just `mints`): (deposit lamports, deposit tokens, anchor
+    times, SOL reserve, token reserve)."""
     grads = pl.read_parquet(out / "graduates.parquet")
+    if mints is not None:
+        grads = grads.filter(pl.col("mint").is_in(mints))
     swaps = (
         pl.scan_parquet(sorted(out.glob("swaps-*.parquet")))
+        .filter(pl.col("pool").is_in(grads["pool"].to_list()))
         .unique(["pool", "slot", "tx_index", "sol_in", "sol_out", "tok_in", "tok_out"])
         .sort(["pool", "slot", "tx_index"])
         .collect()
