@@ -7,7 +7,7 @@ universe filters or bundle checks yet; those arrive with real data in M3/M4.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from cryptobot.curve import LAUNCH
 from cryptobot.replay import Buy, Sell, View
@@ -48,4 +48,47 @@ class DipBuyer:
             return Sell("stall")
         if self.quiet_ms is not None and view.quiet_ms >= self.quiet_ms:
             return Sell("quiet")
+        return None
+
+
+@dataclass(frozen=True)
+class Breakout:
+    """Momentum: buy a token whose curve is running, not dipping (screen.py's `mom`).
+
+    Buys when curve progress first reaches `progress`, if the token is at most
+    `max_age_ms` old then. Exits by target, stop, trailing stop, `ride` (progress
+    reaches that share, before the curve completes) or a time limit.
+    """
+
+    stake_lamports: int
+    progress: float = 0.25
+    max_age_ms: int = 3 * 60_000
+    target: float | None = None
+    stop: float | None = None
+    trail: float | None = None
+    ride: float | None = None
+    timeout_ms: int | None = 60 * 60_000
+    _seen: list = field(default_factory=list, compare=False, repr=False)
+
+    def decide(self, view: View) -> Buy | Sell | None:
+        pos = view.position
+        if pos is None:
+            if self._seen:  # only the first time progress reaches the level
+                return None
+            if view.curve.progress >= self.progress:
+                self._seen.append(True)
+                if view.age_ms <= self.max_age_ms:
+                    return Buy(self.stake_lamports, f"progress {self.progress:.0%}")
+            return None
+        if self.target is not None and view.price >= pos.entry_price * (1 + self.target):
+            return Sell("target")
+        if self.stop is not None and view.price < pos.entry_price * (1 - self.stop):
+            return Sell("stop")
+        high = view.high_since_entry
+        if self.trail is not None and high is not None and view.price <= high * (1 - self.trail):
+            return Sell("trail")
+        if self.ride is not None and view.curve.progress >= self.ride:
+            return Sell("ride")
+        if self.timeout_ms is not None and view.ts_ms - pos.entry_ts_ms >= self.timeout_ms:
+            return Sell("timeout")
         return None
