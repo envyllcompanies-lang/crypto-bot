@@ -282,6 +282,13 @@ def save(scored: pl.DataFrame, meta: dict, path: Path = TRACKED_PATH) -> None:
     path.with_suffix(".json").write_text(json.dumps(meta, indent=1))
 
 
+def load_top(path: Path = TRACKED_PATH, n: int = 50) -> list[str] | None:
+    """The `n` most profitable tracked wallets (the file is sorted by profit)."""
+    if not path.exists():
+        return None
+    return pl.read_parquet(path, columns=["user"])["user"].head(n).to_list()
+
+
 def load_list(path: Path = TRACKED_PATH) -> frozenset[str] | None:
     """The saved tracked-wallet list, or None if none has been built yet."""
     if not path.exists():

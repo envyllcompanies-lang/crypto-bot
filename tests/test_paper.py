@@ -418,3 +418,46 @@ def test_lookup_delays_split_holder_lookups_from_narrative_verdicts(tmp_path):
     text = "\n".join(lookup_section(tmp_path))
     assert "| narrative | 1 | 0 | 8.00 s |" in text
     assert "No lookups" in "\n".join(lookup_section(tmp_path / "missing"))
+
+
+def late_tape(leader="leader"):
+    """Buyers take the curve past 90% (the 12th 5-SOL buy), then a holder sells."""
+    t = Tape()
+    t.buy(1_000, 5, user=leader)
+    for k in range(1, 14):
+        t.buy(1_000 + k * 3_000, 5, user=f"b{k}")
+    t.sell(60_000, "b1")
+    return t
+
+
+def test_late_universe_buys_at_the_first_cross_only_after_a_top_leader(tmp_path):
+    from cryptobot.v1 import late_variants
+
+    for top, want in ((["leader"], {"late_p90_leader", "late_p90"}), (["other"], {"late_p90"})):
+        eng = Engine(late_variants(), out=Sink(tmp_path / top[0], OUT_SCHEMAS))
+        eng.on_tracked({"received_ms": 0, "wallets": ["leader", "other"], "top": top})
+        eng.on_create(create_row())
+        for row in late_tape().rows:
+            eng.on_trade(row)
+        eng.finish()
+        buys = read_table(tmp_path / top[0], "decisions").filter(
+            read_table(tmp_path / top[0], "decisions")["kind"] == "signal_buy"
+        )
+        bought = {v.split("|")[0] for v in buys["variant"].to_list()}
+        assert bought == want
+        # one decision per variant, made on the trade that first crossed 90%
+        assert buys.height == 2 * len(want)
+        assert set(buys["ts_ms"].to_list()) == {1_000 + 11 * 3_000}
+
+
+def test_late_leader_universe_waits_for_a_leader_list(tmp_path):
+    from cryptobot.v1 import late_variants
+
+    eng = Engine(late_variants(), out=Sink(tmp_path, OUT_SCHEMAS))
+    eng.on_create(create_row())
+    for row in late_tape().rows:
+        eng.on_trade(row)
+    eng.finish()
+    d = read_table(tmp_path, "decisions")
+    bought = {v.split("|")[0] for v in d.filter(d["kind"] == "signal_buy")["variant"].to_list()}
+    assert bought == {"late_p90"}

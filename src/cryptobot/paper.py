@@ -78,10 +78,11 @@ from cryptobot.holders import LOOKUP_SCHEMA, PUBLIC_RPC, TOP_N, LookupWorker, cl
 from cryptobot.narrative import make_judge
 from cryptobot.recorder import LIVE, PUBLIC_WS, SCHEMAS, Sink, next_seq, now_ms, record
 from cryptobot.replay import TICK_MS, Buy, FillConfig, Position, Sell, TradeResult, View
-from cryptobot.tracked import TRACKED_PATH, load_list
+from cryptobot.tracked import TRACKED_PATH, load_list, load_top
 from cryptobot.v1 import (
     FINAL_STRETCH_MAX_AGE_MS,
     HARD_MAX_STAKE,
+    LEADER_TOP,
     Universe,
     Variant,
     check,
@@ -142,6 +143,7 @@ TRACKED_SCHEMA = {
     "event_index": pl.UInt16,
     "list_mtime_ms": pl.Int64,
     "wallets": pl.List(pl.Utf8),
+    "top": pl.List(pl.Utf8),  # the most profitable, in order (late_p90_leader); may be null
 }
 # Each creator-record file the live run loaded (creators.py), as parallel lists.
 CREATORS_SCHEMA = {
@@ -265,6 +267,10 @@ class Engine:
         self.requested: set[str] = set()
         # Tracked-wallet list (tracked.py); None until one is loaded.
         self.tracked: frozenset[str] | None = None
+        # The most profitable tracked wallets, for the late-curve leader rule.
+        self.leaders: frozenset[str] | None = None
+        # Late-curve universes: tokens whose curve already crossed the universe's cut-off.
+        self.late_crossed: set[tuple[str, str]] = set()
         # Creator records (creators.py): creator -> (launches, graduated, last launch ms).
         self.creators: dict[str, tuple[int, int, int]] | None = None
         self.creator_launches: dict[str, int] = {}  # creator -> newest launch seen live
@@ -393,6 +399,8 @@ class Engine:
         """A tracked-wallet list took effect (loaded live, or replayed from the recording)."""
         self._advance(row["received_ms"])
         self.tracked = frozenset(row["wallets"])
+        top = row.get("top")
+        self.leaders = frozenset(top) if top else None
         self.stats["tracked_lists"] += 1
 
     def on_lookup(self, row: dict) -> None:
@@ -437,6 +445,19 @@ class Engine:
         if u.kind == "all":
             return True
         checks = check(u, tok, ts, self.tracked)
+        if u.kind == "late":
+            # Decide only on the trade that first takes the curve past the cut-off (screen.py's
+            # `late` entries); a token that crossed before stays out for good.
+            key = (u.name, tok.mint)
+            crossed = tok.curve.progress >= u.cutoff
+            checks["first_cross_now"] = crossed and key not in self.late_crossed
+            if crossed:
+                self.late_crossed.add(key)
+            if u.leader_top:
+                held = self.leaders is not None and any(
+                    w in self.leaders for w in tok.balances
+                )  # every wallet that bought the token, still holding or not
+                checks["top_leader_bought"] = held if self.leaders is not None else False
         if u.kind == "final_stretch":
             members = self.columns[u.name]
             if passes(checks):
@@ -448,7 +469,7 @@ class Engine:
             assert self.first_ts is not None
             checks["column_complete"] = ts - self.first_ts >= FINAL_STRETCH_MAX_AGE_MS
             checks["column_bottom_four_not_top_two"] = tok.mint in column_window(members, ts)
-        if u.kind != "all" and self.holder_checks:
+        if u.kind not in ("all", "late") and self.holder_checks:
             row = self.lookups.get(tok.mint)
             if row is None:
                 if passes(checks) and tok.mint not in self.requested:
@@ -783,6 +804,7 @@ class Engine:
         self.requested.discard(mint)
         for u in self.universes:
             self.gates.pop((mint, u.name), None)
+            self.late_crossed.discard((u.name, mint))
         for members in self.columns.values():
             members.pop(mint, None)
 
@@ -958,7 +980,9 @@ class TrackedFeed(_FileFeed):
 
     def read(self) -> dict | None:
         wallets = load_list(self.path)
-        return None if wallets is None else {"wallets": sorted(wallets)}
+        if wallets is None:
+            return None
+        return {"wallets": sorted(wallets), "top": load_top(self.path, LEADER_TOP)}
 
     def apply(self, row: dict) -> None:
         self.engine.on_tracked(row)

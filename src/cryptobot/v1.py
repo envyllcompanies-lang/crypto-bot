@@ -61,6 +61,14 @@ CORE = (0.40, 0.45, 0.0)  # V1's own method: 40% dip, +45% bounce, exit at entry
 # Filled in by the paper engine from a live lookup (holders.py); None until then.
 LOOKUP_CHECKS = ("x_link_is_community", "top5_sol_balances_differ", "top5_funding_not_clustered")
 NOT_EVALUATED: tuple[str, ...] = ()
+# Late-curve universes (not V1; screen.py and follow.py's confluence test, 14 Oct 2026):
+# buy when curve progress first reaches LATE_CUTOFF, optionally only if one of the
+# LEADER_TOP most profitable tracked wallets bought the token before.
+LATE_CUTOFF = 0.90
+LATE_MAX_AGE_MS = 60 * 60 * 1000
+LEADER_TOP = 50
+LATE_TIMEOUT_MS = 60 * 60 * 1000
+LATE_EXITS = ((0.25, 0.15, None), (None, 0.30, 0.25))  # (target, stop, trail)
 # V1 avoids tokens with "a ton of tracked wallets"; it gives no number. M4 tests others.
 MAX_TRACKED_HOLDERS = 2
 
@@ -68,7 +76,7 @@ MAX_TRACKED_HOLDERS = 2
 @dataclass(frozen=True)
 class Universe:
     name: str
-    kind: str  # "all" (no filter), "new_pairs", "final_stretch" or "conviction"
+    kind: str  # "all" (no filter), "new_pairs", "final_stretch", "conviction" or "late"
     stake_lamports: int
     cutoff: float = 0.0  # Final Stretch only: minimum curve progress
     narrative_gate: bool = False  # conviction only: LLM narrative score caps the tier
@@ -76,6 +84,7 @@ class Universe:
     labels: bool = False  # conviction only: every eligible token, entered at once
     elite: bool = False  # conviction only: one strict rule (conviction.elite_misses)
     thesis: bool = False  # elite only: also require a legit thesis
+    leader_top: int = 0  # late only: a top-N tracked wallet must have bought first
 
 
 ALL = Universe("all", "all", NEW_PAIRS_STAKE)
@@ -120,6 +129,12 @@ def check(
     """
     if u.kind == "all":
         return {}
+    if u.kind == "late":
+        return {
+            "not_tainted": tok.tainted is None,
+            "not_graduated": not tok.curve.graduated,
+            "age_le_60m": tok.age_ms(now_ms) <= LATE_MAX_AGE_MS,
+        }
     if u.kind == "conviction":
         # Only the entry gate; the rest is scored, not filtered (conviction.py).
         return {
@@ -197,6 +212,7 @@ class Variant:
             "labels": self.universe.labels,
             "elite": self.universe.elite,
             "thesis": self.universe.thesis,
+            "leader_top": self.universe.leader_top,
             "shadow": self.shadow,
             "stake_lamports": getattr(s, "stake_lamports", None),
             "drop": "conviction tier" if self.conviction else getattr(s, "drop", None),
@@ -277,6 +293,38 @@ FOCUS_EXITS = ((0.45, 0.0), (0.05, 0.10))
 ELITE_EXITS = ((0.05, 0.10, None), (None, 0.10, 0.20))
 
 
+def late_universe(max_stake: int = MAX_STAKE, leader: bool = False) -> Universe:
+    name = "late_p90_leader" if leader else "late_p90"
+    stake = min(NEW_PAIRS_STAKE, max_stake)
+    return Universe(name, "late", stake, LATE_CUTOFF, leader_top=LEADER_TOP if leader else 0)
+
+
+def late_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
+    """The pre-registered late-curve test (docs/research/2026-10-14-preregistered-late-
+    leader-test.md): with and without the leader rule, LATE_EXITS, direct fees, 60-minute
+    time limit. The gate picks the moment (first crossing), so the strategy buys at once."""
+    out = []
+    for leader in (True, False):
+        u = late_universe(max_stake, leader)
+        for target, stop, trail in LATE_EXITS:
+            exit_ = f"tp{round(target * 100)}" if target else f"trail{round(trail * 100)}"
+            name = f"{u.name}|{exit_}|sl{round(stop * 100)}|d{DEFAULT_DELAY_MS // 1000}s|direct"
+            strategy = DipBuyer(
+                u.stake_lamports,
+                drop=0.0,
+                target=target,
+                stop_tolerance=stop,
+                min_peak_multiple=1.0,
+                max_age_ms=None,
+                stall_ms=LATE_TIMEOUT_MS,
+                quiet_ms=QUIET_MS,
+                trail=trail,
+            )
+            fill = FillConfig(delay_ms=DEFAULT_DELAY_MS, venue=DIRECT)
+            out.append(Variant(name, u, strategy, fill, shadow=True))
+    return out
+
+
 def default_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
     """What the paper trader runs (cut down on 14 Oct 2026, after the backtests found no
     profitable variant in the full grid): V1's core rule in each V1 universe; the
@@ -298,7 +346,7 @@ def default_variants(max_stake: int = MAX_STAKE) -> list[Variant]:
         )
     labels = labels_universe(max_stake)
     out += [conviction_variant(labels, t, s, shadow=True) for t, s in LABEL_EXITS]
-    return out
+    return out + late_variants(max_stake)
 
 
 def full_grid(max_stake: int = MAX_STAKE) -> list[Variant]:
