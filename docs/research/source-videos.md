@@ -1,11 +1,12 @@
 # Source videos: the strategy as stated
 
-This file lists every rule in the two videos, in the order the creator gives them, followed by the claims to test. It paraphrases the transcripts, with short quotes only where the exact wording matters. Every claim is the creator's, and none has been verified.
+This file lists every rule in the source videos, in the order the creator gives them, followed by the claims to test. It paraphrases the transcripts, with short quotes only where the exact wording matters. Every claim is the creator's, and none has been verified.
 
 | # | Title | URL |
 |---|---|---|
 | V1 | How I Turned $50 into $500,000 Trading Memecoins (Full Scalping Guide) | https://www.youtube.com/watch?v=P1WjCGzIE2A |
 | V2 | The Memecoin Blueprint Day 1: Start With $0 | https://www.youtube.com/watch?v=kOdCGWGO80E |
+| V3 | A beginner's guide to memecoins on the FOMO app (another creator; title not given) | Not given: the owner pasted the transcript on 14 Oct 2026 |
 
 V1 calls itself "part two" of an earlier full-course video. That earlier video is where he first taught the 40% dip method and covered fees and wallet tracking. Neither it nor the "0.1 SOL to 3 SOL" live-trading video he mentions is in this file yet.
 
@@ -130,7 +131,24 @@ V1 levels as multiples of launch, with curve progress (assumed launch $4K / $5K)
 
 These figures come from throwaway calculations, not code in the repo. M0 should regenerate them from `curve.py`. Terminal's threshold for joining "Soon" (Final Stretch) isn't stated in either video, so we define it by curve progress and test a few cut-offs.
 
-## Claims to test
+## V3: attention and following traders
+
+V3 is a different creator's beginner guide, not a rule set. What bears on the strategy:
+
+- **Memecoins are an attention bet.** Buy what you think will get more attention: be early to a viral thing, ask whether it's the first of its kind, whether attention is still growing, and who already holds it.
+- **Follow top traders.** Follow leaderboard wallets in the FOMO app and get a notification when they trade. He also says "don't copy trade people", because streamers know viewers copy them.
+- **Where to look:** the "bonding" tab (tokens about to graduate) and the graduated tab.
+- **Rotation:** when a new narrative breaks, traders sell their longer-term coins to chase it, which he calls an entry into those coins.
+- **Holds:** every big win he cites is a long hold of a large runner, mostly far past graduation (millions of dollars of market cap).
+- **His own record in the video:** a $3K loss on Anom, named traders who round-tripped big gains, and one live $50 trade that made $2.
+
+| ID | Claim | Test |
+|---|---|---|
+| C8 | Following profitable traders' buys makes money | `follow.py`: leaders picked on 1-23 Sep, followed from 24 Sep with a 2 s delay |
+| C9 | Tokens about to graduate are good buys | `screen.py`'s `late_p80` and `late_p90` entries |
+| C10 | Small stakes held through big runs pay for the many losers | Needs post-graduation trades (Slinky21 `swap` table) |
+| C11 | Attention and narrative pick the runners | Live only: the narrative judge and the owner's X verdicts are logged from M6 on |
+
 
 | ID | Claim | Test |
 |---|---|---|
@@ -147,9 +165,11 @@ These figures come from throwaway calculations, not code in the repo. M0 should 
 - "Months where I do not lose, not even in a single day."
 - "$50 into $500K", "0.1 SOL into 100 SOL", "8 months straight with this exact same strategy".
 - "Works 100% of the time" and "every single time". C1 tests this directly.
+- V3's "$30 into $100,000" examples: real on chain but picked from millions of wallets, so they show the tail exists, not how often it comes.
 
 ## Conflicts of interest and risks
 
+- **Referral income:** V3 promotes the FOMO app with a sign-up link in its description.
 - **Referral income:** V2's Terminal link uses his referral code. He earns from viewers' trading volume whether they win or lose.
 - **Platform change:** V1 uses Axiom and V2 uses Terminal. Filter names like "insiders" and "pro traders" are each platform's own and may not mean the same thing on both.
 - **Key export:** V2 shows exporting the Phantom private key and pasting it into Terminal. That gives a third-party website full control of the wallet. This project's rule stands: keys never leave the owner's `.env`.
