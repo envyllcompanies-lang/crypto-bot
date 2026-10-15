@@ -100,6 +100,54 @@ Setup:
    git -C ~/crypto-bot remote set-url origin git@github.com:envyllcompanies-lang/crypto-bot.git && echo CRYPTOBOT_PUSH_REPORTS=1 >> ~/crypto-bot/.env
    ```
 
+## Optional: Reddit and X for the social collector
+
+Both are off until you add keys to `.env` on the server (`nano ~/crypto-bot/.env`), then
+run `sudo systemctl restart crypto-bot-social`. Never paste keys into chat.
+
+**Reddit (free, non-commercial).**
+
+1. Signed in to Reddit, open https://www.reddit.com/prefs/apps and choose "create another
+   app...".
+2. Pick **script**, give it a name, and put `http://localhost` as the redirect URI.
+3. Add three lines to `.env`. The client id is the short string under the app name, and
+   the secret is labelled "secret":
+
+   ```
+   REDDIT_CLIENT_ID=...
+   REDDIT_CLIENT_SECRET=...
+   REDDIT_USERNAME=your_reddit_name
+   ```
+
+It only reads: new posts in memecoin subreddits, and r/popular's hottest titles.
+
+**X (paid).**
+
+X has no free API tier for new developers. As of Oct 2026, guides put it at about
+$0.005 per counts request (X's own pricing page wasn't readable from here). The bot
+makes one request per watched coin, a few hundred a day at most. The budget cap below is
+a hard stop.
+
+1. Create a project and app at https://developer.x.com and buy credits there.
+2. Copy the app's **Bearer Token**.
+3. Add to `.env`:
+
+   ```
+   X_BEARER_TOKEN=...
+   X_MONTHLY_BUDGET_USD=10
+   X_COST_PER_REQUEST_USD=0.005
+   ```
+
+Set `X_COST_PER_REQUEST_USD` to the price X shows you. The bot stops for the month when
+requests x price would pass the budget. It keeps its count in
+`data/derived/x_budget.json`; check X's billing page too.
+
+Check what's on:
+
+```
+sudo journalctl -u crypto-bot-social -n 20 --no-pager    # "reddit: on", "x: on"
+```
+
 ## Things to know
 
 - **Cost check:** the free tier covers the machine, a 30 GB standard disk and 1 GB a month of outbound traffic. The trader mostly downloads, and incoming traffic is free. Google's pricing for the server's public IPv4 address has changed over time, so look at the billing page after a day; the budget alert will also email you.

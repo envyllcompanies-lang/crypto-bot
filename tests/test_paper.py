@@ -506,3 +506,19 @@ def test_gate_records_carry_the_social_signals(tmp_path):
     gates = read_table(tmp_path, "gates")
     social = json.loads(gates["features"][0])["social"]
     assert social == {"loaded": True, "dex_boosts": 20.0, "any": True}
+
+
+def test_live_engine_puts_late_curve_candidates_on_the_watchlist(tmp_path):
+    import json
+
+    from cryptobot.v1 import late_variants
+
+    eng = Engine(late_variants(), out=Sink(tmp_path / "out", OUT_SCHEMAS))
+    eng.watch_path = tmp_path / "watch.jsonl"
+    eng.on_create(create_row())
+    for row in late_tape().rows:
+        eng.on_trade(row)
+    lines = [json.loads(x) for x in eng.watch_path.read_text().splitlines()]
+    assert [x["mint"] for x in lines] == [MINT]  # once, before the 90% entry
+    first_buy = 1_000 + 11 * 3_000
+    assert lines[0]["ts_ms"] < first_buy

@@ -6,6 +6,8 @@ Wants=network-online.target
 [Service]
 User=@USER@
 WorkingDirectory=@DIR@
+# Optional keys (Reddit app, X bearer token and budget) come from the owner's .env.
+EnvironmentFile=-@DIR@/.env
 ExecStart=@DIR@/.venv/bin/python -m cryptobot.social run
 Restart=always
 RestartSec=30

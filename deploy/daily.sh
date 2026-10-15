@@ -47,6 +47,12 @@ find data/paper -mindepth 4 -maxdepth 4 -type d -path '*/events/*' -name '20??-?
 find data/live/social -mindepth 2 -maxdepth 2 -type d -name '20??-??-??' \
   -mtime +"$KEEP_DAYS" -exec rm -rf {} + 2>/dev/null || true
 
+# Keep the watchlist short; social.Watchlist notices the rewrite and starts over.
+if [ -f data/derived/watch.jsonl ]; then
+  tail -n 5000 data/derived/watch.jsonl > data/derived/watch.jsonl.tmp
+  mv data/derived/watch.jsonl.tmp data/derived/watch.jsonl
+fi
+
 SOCIAL_REPORT="data/reports/$DAY-social.md"
 nice -n 10 "$PYTHON" -m cryptobot.social report > "$SOCIAL_REPORT" || rm -f "$SOCIAL_REPORT"
 

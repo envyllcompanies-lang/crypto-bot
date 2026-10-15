@@ -79,6 +79,7 @@ from cryptobot.narrative import make_judge
 from cryptobot.recorder import LIVE, PUBLIC_WS, SCHEMAS, Sink, next_seq, now_ms, record
 from cryptobot.replay import TICK_MS, Buy, FillConfig, Position, Sell, TradeResult, View
 from cryptobot.social import NOW_PATH as SOCIAL_NOW
+from cryptobot.social import WATCH_PATH as SOCIAL_WATCH
 from cryptobot.social import signals as social_signals
 from cryptobot.tracked import TRACKED_PATH, load_list, load_top
 from cryptobot.v1 import (
@@ -173,6 +174,7 @@ EVENT_SCHEMAS = {
     "social": SOCIAL_SCHEMA,
 }
 SOCIAL_POLL_MS = 300_000  # the collector rewrites its file every 2 minutes
+WATCH_AHEAD = 0.10  # late-curve coins join the watchlist 10 points before the cut-off
 TRACKED_POLL_MS = 60_000
 
 
@@ -284,6 +286,10 @@ class Engine:
         self.late_crossed: set[tuple[str, str]] = set()
         # Social and attention signals (social.py); None until a state file is loaded.
         self.social: dict | None = None
+        # Live runs append late-curve and elite candidates here for social.py's closer
+        # (and, for X, paid) look; None in replays and backtests.
+        self.watch_path: Path | None = None
+        self.watched: set[str] = set()
         # Creator records (creators.py): creator -> (launches, graduated, last launch ms).
         self.creators: dict[str, tuple[int, int, int]] | None = None
         self.creator_launches: dict[str, int] = {}  # creator -> newest launch seen live
@@ -416,6 +422,16 @@ class Engine:
         self.leaders = frozenset(top) if top else None
         self.stats["tracked_lists"] += 1
 
+    def _watch(self, tok: TokenState, ts: int, universe: str) -> None:
+        """Put a candidate on the watchlist once (social.Watchlist reads it)."""
+        if tok.mint in self.watched or self.watch_path is None:
+            return
+        self.watched.add(tok.mint)
+        line = {"mint": tok.mint, "name": tok.name, "symbol": tok.symbol, "ts_ms": ts}
+        line["universe"] = universe
+        with self.watch_path.open("a") as f:
+            f.write(json.dumps(line) + "\n")
+
     def on_social(self, row: dict) -> None:
         """A social-signal state took effect (loaded live, or replayed)."""
         self._advance(row["received_ms"])
@@ -470,6 +486,8 @@ class Engine:
             key = (u.name, tok.mint)
             crossed = tok.curve.progress >= u.cutoff
             checks["first_cross_now"] = crossed and key not in self.late_crossed
+            if self.watch_path is not None and tok.curve.progress >= u.cutoff - WATCH_AHEAD:
+                self._watch(tok, ts, u.name)  # early, so social signals arrive before entry
             if crossed:
                 self.late_crossed.add(key)
             if u.leader_top:
@@ -525,6 +543,8 @@ class Engine:
             checks["conviction_tradeable"] = conv is not None and conv.drop is not None
         ok = passes(checks)
         key = (tok.mint, u.name)
+        if ok and self.watch_path is not None and (u.kind == "late" or u.elite):
+            self._watch(tok, ts, u.name)
         if self.gates.get(key) != ok:
             self.gates[key] = ok
             features = tok.snapshot(ts) | _lookup_features(result)
@@ -823,6 +843,7 @@ class Engine:
         for store in self.other_convictions.values():
             store.pop(mint, None)
         self.requested.discard(mint)
+        self.watched.discard(mint)
         for u in self.universes:
             self.gates.pop((mint, u.name), None)
             self.late_crossed.discard((u.name, mint))
@@ -1079,6 +1100,8 @@ def run_live(engine: Engine, minutes: float | None, events_dir: Path) -> None:
     engine.holder_checks = True
     engine.request_lookup = worker.request
     feeds = [TrackedFeed(engine, sink), CreatorFeed(engine, sink), SocialFeed(engine, sink)]
+    SOCIAL_WATCH.parent.mkdir(parents=True, exist_ok=True)
+    engine.watch_path = SOCIAL_WATCH
     for feed in feeds:
         feed.poll(now_ms())
 

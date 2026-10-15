@@ -83,3 +83,42 @@ def test_coingecko_trending_names_and_tickers_become_keywords():
         ("cg_trending", "astro", 1.0, "Astronaut"),
         ("cg_trending", "astronaut", 1.0, "Astronaut"),
     ]
+
+
+def test_count_texts_and_reddit_listing():
+    from cryptobot import reddit
+
+    listing = {"data": {"children": [{"data": {"title": "$BONK runs", "selftext": "bonk"}}]}}
+    texts = reddit.texts(listing)
+    rows, words = social.count_texts(texts, "reddit")
+    assert rows == [("reddit_ticker", "bonk", 1.0, "")]
+    assert words["bonk"] == 1 and words["runs"] == 1
+
+
+def test_watchlist_reads_only_new_lines_once(tmp_path):
+    path = tmp_path / "watch.jsonl"
+    path.write_text('{"mint": "old"}\n')
+    w = social.Watchlist(path)
+    with path.open("a") as f:
+        f.write('{"mint": "A", "name": "x"}\n{"mint": "A"}\nnot json\n')
+    assert [i["mint"] for i in w.new()] == ["A"]
+    assert w.new() == []
+    path.write_text('{"mint": "B"}\n')  # rotated by daily.sh
+    assert [i["mint"] for i in w.new()] == ["B"]
+
+
+def test_x_query_budget_and_summary(tmp_path, monkeypatch):
+    from cryptobot import xapi
+
+    assert xapi.query("MINT", "Christa Pike", "$PIKE") == 'MINT OR $PIKE OR "Christa Pike"'
+    assert xapi.query("MINT", "ab", "?!") == "MINT"
+    b = xapi.Budget(tmp_path / "b.json", monthly_usd=0.01, cost_usd=0.005)
+    assert b.take() and b.take() and not b.take()
+    assert b.spent() == 0.01
+    got = {"data": [{"tweet_count": 3}, {"tweet_count": 7}], "meta": {"total_tweet_count": 10}}
+    assert xapi.summarize(got) == {"x_posts_1h": 7.0, "x_posts_24h": 10.0}
+    monkeypatch.delenv("X_BEARER_TOKEN", raising=False)
+    assert not xapi.configured()
+    monkeypatch.setenv("X_BEARER_TOKEN", "t")
+    monkeypatch.setenv("X_MONTHLY_BUDGET_USD", "0")
+    assert not xapi.configured()  # no budget, no spending

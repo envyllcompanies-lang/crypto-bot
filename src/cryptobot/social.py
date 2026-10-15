@@ -22,9 +22,15 @@ website:
 - **Bluesky** posts (Jetstream, free, no login): mint addresses and $TICKERs counted
   over the last hour.
 
-X, Telegram call channels and Pump.fun's own comments are left out: X is paid or
-scraped against its terms, Telegram's user API risks the account and now bans scraping,
-and Pump.fun's frontend API is undocumented (reports/2026-10-14-social-sources.md).
+- **Reddit** (reddit.py, the official Data API; off until the owner adds free app keys):
+  mints, $TICKERs and word spikes in memecoin subreddits, and word spikes in r/popular.
+- **X** (xapi.py, the official API; paid, off until the owner sets a bearer token and a
+  monthly budget): hourly post counts over 24 hours for each coin on the paper trader's
+  watchlist, one counts request per coin, never reading posts.
+
+Telegram call channels and Pump.fun's own comments are left out: Telegram's user API
+risks the account and now bans scraping, and Pump.fun's frontend API is undocumented
+(reports/2026-10-14-social-sources.md). X scrapers are against X's terms.
 
 `run` polls the sources, saves every snapshot under data/live/social/<source>/<date>/,
 and keeps a compact current state in data/derived/social_now.json. The paper trader
@@ -50,11 +56,17 @@ from pathlib import Path
 
 import polars as pl
 
+from cryptobot import reddit, xapi
 from cryptobot.attention import MIN_KEY_CHARS, keys, norm, wiki_top
 from cryptobot.recorder import LIVE
 
 SOCIAL = LIVE / "social"
 NOW_PATH = LIVE.parent / "derived" / "social_now.json"
+# Coins the paper trader wants a closer look at (one JSON line each; paper.Engine).
+WATCH_PATH = LIVE.parent / "derived" / "watch.jsonl"
+X_BUDGET_PATH = LIVE.parent / "derived" / "x_budget.json"
+REDDIT_NEW_EVERY_S = 120
+REDDIT_POPULAR_EVERY_S = 600
 USER_AGENT = (
     "crypto-bot-research/0.1 (private research; github.com/envyllcompanies-lang/crypto-bot)"
 )
@@ -215,6 +227,56 @@ def parse_biz(raw: bytes) -> list[tuple[str, str, float, str]]:
     return [(kind, key, float(n), "") for (kind, key), n in counts.items()]
 
 
+def count_texts(
+    texts: list[str], prefix: str, words: bool = True
+) -> tuple[list[tuple[str, str, float, str]], dict[str, float]]:
+    """Mint and $TICKER counts as rows, and per-word post counts (for Spikes)."""
+    counts: dict[tuple[str, str], int] = {}
+    word_posts: dict[str, float] = {}
+    for text in texts:
+        mints, tickers = mentions(text)
+        for m in mints:
+            counts[(f"{prefix}_mint", m)] = counts.get((f"{prefix}_mint", m), 0) + 1
+        for t in tickers:
+            counts[(f"{prefix}_ticker", t)] = counts.get((f"{prefix}_ticker", t), 0) + 1
+        if words:
+            for w in {norm(w) for w in WORD.findall(text)}:
+                if len(w) >= MIN_KEY_CHARS:
+                    word_posts[w] = word_posts.get(w, 0) + 1
+    rows = [(kind, key, float(n), "") for (kind, key), n in counts.items()]
+    return rows, word_posts
+
+
+class Watchlist:
+    """New lines of the paper trader's watch file, read from where it last stopped."""
+
+    def __init__(self, path: Path = WATCH_PATH) -> None:
+        self.path = path
+        self.offset = path.stat().st_size if path.exists() else 0  # only new coins
+        self.done: set[str] = set()
+
+    def new(self) -> list[dict]:
+        if not self.path.exists():
+            return []
+        size = self.path.stat().st_size
+        if size < self.offset:  # the file was rotated
+            self.offset = 0
+        with self.path.open() as f:
+            f.seek(self.offset)
+            lines = f.readlines()
+            self.offset = f.tell()
+        out = []
+        for line in lines:
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if item.get("mint") and item["mint"] not in self.done:
+                self.done.add(item["mint"])
+                out.append(item)
+        return out
+
+
 class BlueskyCounter:
     """Counts mint addresses and $TICKERs in every public Bluesky post (Jetstream, free,
     no login), keeping only matches, so memory stays small."""
@@ -350,6 +412,18 @@ def run(path: Path = NOW_PATH) -> None:
     counter = BlueskyCounter()
     bluesky_thread(counter)
     biz_spikes = Spikes("biz_spike")
+    red = reddit.Reddit() if reddit.configured() else None
+    red_spikes = Spikes("reddit_spike", alpha=1 / 720, warmup=30)  # polls every 2 min
+    pop_spikes = Spikes("reddit_trend", alpha=1 / 144, warmup=6)  # every 10 min
+    if red is not None:
+        due |= {"reddit_new": 0.0, "reddit_popular": 0.0}
+    x = xapi.XCounts(X_BUDGET_PATH) if xapi.configured() else None
+    watch = Watchlist()
+    print(
+        f"reddit: {'on' if red else 'off (no REDDIT_CLIENT_ID)'}; "
+        f"x: {'on' if x else 'off (no X_BEARER_TOKEN or X_MONTHLY_BUDGET_USD)'}",
+        flush=True,
+    )
     print("social collector started", flush=True)
     while True:
         now = time.time()
@@ -357,13 +431,26 @@ def run(path: Path = NOW_PATH) -> None:
         for name, at in due.items():
             if now < at:
                 continue
-            every = {"wiki_top": WIKI_EVERY_S, "bluesky": BSKY_EVERY_S}.get(name)
+            every = {
+                "wiki_top": WIKI_EVERY_S,
+                "bluesky": BSKY_EVERY_S,
+                "reddit_new": REDDIT_NEW_EVERY_S,
+                "reddit_popular": REDDIT_POPULAR_EVERY_S,
+            }.get(name)
             every = every or SOURCES[name][1]
             try:
                 if name == "wiki_top":
                     rows = parse_wiki((datetime.now(UTC) - timedelta(days=1)).date())
                 elif name == "bluesky":
                     rows = counter.rows(int(time.time() * 1000))
+                elif name == "reddit_new":
+                    assert red is not None
+                    rows, words = count_texts(red.new_posts(), "reddit")
+                    rows += red_spikes.update(words)
+                elif name == "reddit_popular":
+                    assert red is not None
+                    _, words = count_texts(red.popular_titles(), "popular")
+                    rows = pop_spikes.update(words, min_count=2, ratio=3.0)
                 else:
                     rows = PARSERS[name](_get(SOURCES[name][0]))
                 if name == "biz":  # keep mints and tickers; words only when they spike
@@ -378,6 +465,21 @@ def run(path: Path = NOW_PATH) -> None:
             update(state, rows, now_ms)
             changed = True
             due[name] = now + every
+        if x is not None:
+            for item in watch.new():
+                try:
+                    got = x.counts(item["mint"], item.get("name"), item.get("symbol"))
+                except Exception as e:
+                    print(f"x: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                    continue
+                if got is None:
+                    print("x: monthly budget used up; skipping until next month", flush=True)
+                    break
+                now_ms = int(time.time() * 1000)
+                rows = [(k, item["mint"], v, "") for k, v in got.items()]
+                _save("x", rows, now_ms)
+                update(state, rows, now_ms)
+                changed = True
         if changed:
             write_state(state, path)
         time.sleep(TICK_S)
@@ -442,6 +544,12 @@ def report(root: Path) -> str:
         "biz_spike",
         "bsky_mint",
         "bsky_ticker",
+        "reddit_mint",
+        "reddit_ticker",
+        "reddit_spike",
+        "reddit_trend",
+        "x_posts_1h",
+        "x_posts_24h",
     ]
     for k in kinds:
         j = j.with_columns(pl.col("social").str.json_path_match(f"$.{k}").is_not_null().alias(k))

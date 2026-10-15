@@ -143,6 +143,8 @@ The owner wants X and other social accounts used to track virality and each toke
 | Our own recorder on a Solana RPC websocket | Forward data we control | Free: public RPC, no key (Helius free tier as a fallback) | Built (M5, `recorder.py`); checked in the M5 report |
 | PumpPortal websocket | New-token and migration events | Free; token trades metered | Optional |
 | PumpFunData archive | Hourly Parquet since Feb 2026 | About $24 a month of data | Ask before buying |
+| Reddit Data API (`reddit.py`) | Memecoin subreddits and r/popular, for `social.py` | Free (non-commercial); owner's app keys in `.env` | Built, off until keys are added |
+| X API counts (`xapi.py`) | Hourly post counts for watched coins | Paid: about $0.005 a request (Oct 2026, third-party figure); owner sets `X_MONTHLY_BUDGET_USD` | Built, off until a token and budget are set |
 
 The environment needs `huggingface.co` (datasets) and `publish.twitter.com` (oEmbed) on its allowed domains. Treat both free datasets as unverified: check a sample of rows against the chain, and check that reserves reproduce prices with the curve formula, before trusting results.
 
