@@ -100,9 +100,9 @@ Setup:
    git -C ~/crypto-bot remote set-url origin git@github.com:envyllcompanies-lang/crypto-bot.git && echo CRYPTOBOT_PUSH_REPORTS=1 >> ~/crypto-bot/.env
    ```
 
-## Optional: Reddit and X for the social collector
+## Optional: Reddit, YouTube, Farcaster, Telegram and X for the social collector
 
-Both are off until you add keys to `.env` on the server (`nano ~/crypto-bot/.env`), then
+Each is off until you add keys to `.env` on the server (`nano ~/crypto-bot/.env`), then
 run `sudo systemctl restart crypto-bot-social`. Never paste keys into chat.
 
 **Reddit (free, non-commercial).**
@@ -120,6 +120,56 @@ run `sudo systemctl restart crypto-bot-social`. Never paste keys into chat.
    ```
 
 It only reads: new posts in memecoin subreddits, and r/popular's hottest titles.
+
+**YouTube (free).**
+
+1. In the Google Cloud console (the same account as the server), open "APIs & Services".
+2. Enable "YouTube Data API v3".
+3. Create an API key, and restrict it to that API.
+4. Add it to `.env`:
+
+   ```
+   YOUTUBE_API_KEY=...
+   ```
+
+It reads the 50 most popular US videos every 30 minutes. It also searches up to 60 watched
+coins a day, which stays inside the free 10,000 units a day.
+
+**Farcaster (free).** Sign up at https://neynar.com (free plan), copy the API key and add
+it to `.env`:
+
+```
+NEYNAR_API_KEY=...
+```
+
+**Telegram public channels (free, uses your own account; read the risk first).**
+
+Telegram allows this API, but accounts logged in through third-party apps can be flagged
+or banned. Its terms added a data-scraping clause in Feb 2026. Use an account you can
+afford to lose, list only public channels you would follow anyway, and the bot never
+posts.
+
+1. Get an `api_id` and `api_hash` at https://my.telegram.org under "API development
+   tools".
+2. Add to `.env`:
+
+   ```
+   TELEGRAM_API_ID=...
+   TELEGRAM_API_HASH=...
+   TELEGRAM_CHANNELS=channelname1,channelname2
+   ```
+
+3. Log in once on the server. It asks for your phone number and the code Telegram sends:
+
+   ```
+   .venv/bin/python -m cryptobot.telegram_feed login
+   ```
+
+   This creates `data/derived/telegram.session`, which is a login: never share it. It is
+   git-ignored.
+
+Mastodon and GDELT (world news coverage of each watched coin's name) need no keys and
+are always on.
 
 **X (paid).**
 
@@ -145,7 +195,7 @@ requests x price would pass the budget. It keeps its count in
 Check what's on:
 
 ```
-sudo journalctl -u crypto-bot-social -n 20 --no-pager    # "reddit: on", "x: on"
+sudo journalctl -u crypto-bot-social -n 20 --no-pager    # "social sources with keys: ..."
 ```
 
 ## Things to know

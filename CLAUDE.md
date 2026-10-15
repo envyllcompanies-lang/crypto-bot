@@ -144,6 +144,9 @@ The owner wants X and other social accounts used to track virality and each toke
 | PumpPortal websocket | New-token and migration events | Free; token trades metered | Optional |
 | PumpFunData archive | Hourly Parquet since Feb 2026 | About $24 a month of data | Ask before buying |
 | Reddit Data API (`reddit.py`) | Memecoin subreddits and r/popular, for `social.py` | Free (non-commercial); owner's app keys in `.env` | Built, off until keys are added |
+| Mastodon trends, GDELT news (`freesocial.py`) | Trending tags and posts; news volume for watched coins | Free, no key | Built, always on |
+| YouTube Data API, Farcaster via Neynar (`freesocial.py`) | Popular-video title spikes and watched-coin video counts; trending casts | Free keys in `.env` | Built, off until keys are added |
+| Telegram public channels (`telegram_feed.py`, Telethon) | Mints and $TICKERs in channels the owner lists | Free; the owner's account, with a ban risk the owner accepts | Built, off until the owner logs in on the server |
 | X API counts (`xapi.py`) | Hourly post counts for watched coins | Paid: about $0.005 a request (Oct 2026, third-party figure); owner sets `X_MONTHLY_BUDGET_USD` | Built, off until a token and budget are set |
 
 The environment needs `huggingface.co` (datasets) and `publish.twitter.com` (oEmbed) on its allowed domains. Treat both free datasets as unverified: check a sample of rows against the chain, and check that reserves reproduce prices with the curve formula, before trusting results.

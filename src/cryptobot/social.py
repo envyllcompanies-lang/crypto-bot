@@ -28,9 +28,12 @@ website:
   monthly budget): hourly post counts over 24 hours for each coin on the paper trader's
   watchlist, one counts request per coin, never reading posts.
 
-Telegram call channels and Pump.fun's own comments are left out: Telegram's user API
-risks the account and now bans scraping, and Pump.fun's frontend API is undocumented
-(reports/2026-10-14-social-sources.md). X scrapers are against X's terms.
+- **Mastodon, GDELT news, YouTube, Farcaster** (freesocial.py; YouTube and Farcaster need
+  free keys) and **Telegram public channels** (telegram_feed.py; the owner's account,
+  read-only, with a ban risk the owner accepts by setting it up).
+
+Pump.fun's own comments are left out (its frontend API is undocumented), and so are X
+scrapers, which break X's terms (reports/2026-10-14-social-sources.md).
 
 `run` polls the sources, saves every snapshot under data/live/social/<source>/<date>/,
 and keeps a compact current state in data/derived/social_now.json. The paper trader
@@ -56,7 +59,7 @@ from pathlib import Path
 
 import polars as pl
 
-from cryptobot import reddit, xapi
+from cryptobot import freesocial, reddit, telegram_feed, xapi
 from cryptobot.attention import MIN_KEY_CHARS, keys, norm, wiki_top
 from cryptobot.recorder import LIVE
 
@@ -81,14 +84,26 @@ SOURCES = {
     # 4chan's official read-only API asks for at most one request a second; once a minute.
     "biz": ("https://a.4cdn.org/biz/catalog.json", 60),
 }
-MINT_SOURCES = (
+MINT_SOURCES = (  # kinds whose key is a mint address (the rest are keywords)
     "dex_boosts",
     "dex_profiles",
     "dex_takeovers",
     "gt_trending",
     "biz_mint",
     "bsky_mint",
+    "reddit_mint",
+    "mastodon_mint",
+    "farcaster_mint",
+    "tg_mint",
+    "x_posts_1h",
+    "x_posts_24h",
+    "gdelt_vol_24h",
+    "gdelt_vol_last",
+    "yt_videos_24h",
 )
+MASTODON_EVERY_S = 900
+YT_POPULAR_EVERY_S = 1800
+FARCASTER_EVERY_S = 900
 JETSTREAM = "wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post"
 BSKY_EVERY_S = 300
 BSKY_WINDOW_MS = 3600 * 1000  # Bluesky mention counts cover the last hour
@@ -277,13 +292,14 @@ class Watchlist:
         return out
 
 
-class BlueskyCounter:
-    """Counts mint addresses and $TICKERs in every public Bluesky post (Jetstream, free,
-    no login), keeping only matches, so memory stays small."""
+class StreamCounter:
+    """Counts mint addresses and $TICKERs in a stream of posts (Bluesky, Telegram) over
+    the last hour, keeping only the matches, so memory stays small."""
 
-    def __init__(self) -> None:
+    def __init__(self, prefix: str = "bsky") -> None:
         import threading
 
+        self.prefix = prefix
         self.seen: list[tuple[int, str, str]] = []  # (ms, kind, key)
         self.posts = 0
         self.lock = threading.Lock()  # add() runs in the listener thread, rows() in the main
@@ -292,8 +308,8 @@ class BlueskyCounter:
         mints, tickers = mentions(text)
         with self.lock:
             self.posts += 1
-            self.seen += [(now_ms, "bsky_mint", m) for m in mints]
-            self.seen += [(now_ms, "bsky_ticker", t) for t in tickers]
+            self.seen += [(now_ms, f"{self.prefix}_mint", m) for m in mints]
+            self.seen += [(now_ms, f"{self.prefix}_ticker", t) for t in tickers]
 
     def rows(self, now_ms: int) -> list[tuple[str, str, float, str]]:
         cut = now_ms - BSKY_WINDOW_MS
@@ -306,7 +322,10 @@ class BlueskyCounter:
         return [(kind, key, float(n), "") for (kind, key), n in counts.items()]
 
 
-def bluesky_thread(counter: BlueskyCounter) -> None:
+BlueskyCounter = StreamCounter
+
+
+def bluesky_thread(counter: StreamCounter) -> None:
     """Keep a Jetstream connection open in the background; reconnect on any error."""
     import asyncio
     import threading
@@ -330,7 +349,8 @@ def bluesky_thread(counter: BlueskyCounter) -> None:
 
 def parse_wiki(day) -> list[tuple[str, str, float, str]]:
     rows = []
-    for article, rank in wiki_top(day).select("article", "rank").iter_rows():
+    # One quick try: a rate-limited fetch must not stall the other sources; run() retries.
+    for article, rank in wiki_top(day, attempts=1).select("article", "rank").iter_rows():
         for key in keys(article):
             rows.append(("wiki_top", key, float(rank), article))
     return rows
@@ -406,56 +426,105 @@ PARSERS = {
 
 
 def run(path: Path = NOW_PATH) -> None:
-    """Poll every source on its own schedule until stopped; a failed poll is retried."""
+    """Poll every source on its own schedule until stopped; a failed poll is retried.
+
+    Keyed sources (Reddit, YouTube, Farcaster, Telegram, X) run only when the owner's
+    `.env` has their keys; the start-up line says which are on.
+    """
     state: dict = json.loads(path.read_text()) if path.exists() else {}
-    due = {name: 0.0 for name in [*SOURCES, "wiki_top", "bluesky"]}
-    counter = BlueskyCounter()
-    bluesky_thread(counter)
-    biz_spikes = Spikes("biz_spike")
+    bsky = StreamCounter("bsky")
+    bluesky_thread(bsky)
+    tg = StreamCounter("tg")
+    if telegram_feed.configured():
+        telegram_feed.start(tg.add)
     red = reddit.Reddit() if reddit.configured() else None
-    red_spikes = Spikes("reddit_spike", alpha=1 / 720, warmup=30)  # polls every 2 min
-    pop_spikes = Spikes("reddit_trend", alpha=1 / 144, warmup=6)  # every 10 min
-    if red is not None:
-        due |= {"reddit_new": 0.0, "reddit_popular": 0.0}
+    yt = freesocial.YouTube() if freesocial.youtube_configured() else None
     x = xapi.XCounts(X_BUDGET_PATH) if xapi.configured() else None
+    farcaster = freesocial.neynar_configured()
+    gdelt = freesocial.Gdelt()
+    spikes = {
+        "biz": Spikes("biz_spike"),
+        "reddit_new": Spikes("reddit_spike", alpha=1 / 720, warmup=30),  # every 2 min
+        "reddit_popular": Spikes("reddit_trend", alpha=1 / 144, warmup=6),  # every 10 min
+        "mastodon": Spikes("mastodon_spike", alpha=1 / 96, warmup=4),  # every 15 min
+        "yt_popular": Spikes("yt_trend", alpha=1 / 48, warmup=4),  # every 30 min
+    }
+    every = {name: secs for name, (_, secs) in SOURCES.items()} | {
+        "wiki_top": WIKI_EVERY_S,
+        "bluesky": BSKY_EVERY_S,
+        "mastodon": MASTODON_EVERY_S,
+    }
+    if telegram_feed.configured():
+        every["telegram"] = BSKY_EVERY_S
+    if red is not None:
+        every |= {"reddit_new": REDDIT_NEW_EVERY_S, "reddit_popular": REDDIT_POPULAR_EVERY_S}
+    if yt is not None:
+        every["yt_popular"] = YT_POPULAR_EVERY_S
+    if farcaster:
+        every["farcaster"] = FARCASTER_EVERY_S
+    due = {name: 0.0 for name in every}
     watch = Watchlist()
-    print(
-        f"reddit: {'on' if red else 'off (no REDDIT_CLIENT_ID)'}; "
-        f"x: {'on' if x else 'off (no X_BEARER_TOKEN or X_MONTHLY_BUDGET_USD)'}",
-        flush=True,
-    )
+    queues: dict[str, list[dict]] = {"gdelt": [], "youtube": []}
+    on = {
+        "reddit": red is not None,
+        "youtube": yt is not None,
+        "farcaster": farcaster,
+        "telegram": telegram_feed.configured(),
+        "x": x is not None,
+    }
+    print("social sources with keys: " + ", ".join(f"{k} {'on' if v else 'off'}"
+          for k, v in on.items()), flush=True)  # fmt: skip
     print("social collector started", flush=True)
+
+    def poll(name: str) -> list[tuple[str, str, float, str]]:
+        now_ms = int(time.time() * 1000)
+        if name == "wiki_top":
+            return parse_wiki((datetime.now(UTC) - timedelta(days=1)).date())
+        if name == "bluesky":
+            return bsky.rows(now_ms)
+        if name == "telegram":
+            return tg.rows(now_ms)
+        if name == "reddit_new":
+            assert red is not None
+            rows, words = count_texts(red.new_posts(), "reddit")
+            return rows + spikes[name].update(words)
+        if name == "reddit_popular":
+            assert red is not None
+            _, words = count_texts(red.popular_titles(), "popular")
+            return spikes[name].update(words, min_count=2, ratio=3.0)
+        if name == "mastodon":
+            tags = freesocial.mastodon_tags(freesocial._get(f"{freesocial.MASTODON}/tags?limit=20"))
+            raw = freesocial._get(f"{freesocial.MASTODON}/statuses?limit=40")
+            rows, words = count_texts(freesocial.mastodon_texts(raw), "mastodon")
+            return tags + rows + spikes[name].update(words, min_count=2, ratio=3.0)
+        if name == "yt_popular":
+            assert yt is not None
+            _, words = count_texts(yt.popular_titles(), "yt")
+            return spikes[name].update(words, min_count=2, ratio=3.0)
+        if name == "farcaster":
+            rows, _ = count_texts(freesocial.farcaster_texts(), "farcaster", words=False)
+            return rows
+        rows = PARSERS[name](_get(SOURCES[name][0]))
+        if name == "biz":  # keep mints and tickers; words only when they spike
+            words = {k: v for kind, k, v, _ in rows if kind == "biz_word"}
+            rows = [r for r in rows if r[0] != "biz_word"] + spikes["biz"].update(words)
+        return rows
+
+    def coin(source: str, item: dict, got: dict | None) -> None:
+        if not got:
+            return
+        now_ms = int(time.time() * 1000)
+        rows = [(k, item["mint"], v, "") for k, v in got.items()]
+        _save(source, rows, now_ms)
+        update(state, rows, now_ms)
+
     while True:
         now = time.time()
-        changed = False
         for name, at in due.items():
             if now < at:
                 continue
-            every = {
-                "wiki_top": WIKI_EVERY_S,
-                "bluesky": BSKY_EVERY_S,
-                "reddit_new": REDDIT_NEW_EVERY_S,
-                "reddit_popular": REDDIT_POPULAR_EVERY_S,
-            }.get(name)
-            every = every or SOURCES[name][1]
             try:
-                if name == "wiki_top":
-                    rows = parse_wiki((datetime.now(UTC) - timedelta(days=1)).date())
-                elif name == "bluesky":
-                    rows = counter.rows(int(time.time() * 1000))
-                elif name == "reddit_new":
-                    assert red is not None
-                    rows, words = count_texts(red.new_posts(), "reddit")
-                    rows += red_spikes.update(words)
-                elif name == "reddit_popular":
-                    assert red is not None
-                    _, words = count_texts(red.popular_titles(), "popular")
-                    rows = pop_spikes.update(words, min_count=2, ratio=3.0)
-                else:
-                    rows = PARSERS[name](_get(SOURCES[name][0]))
-                if name == "biz":  # keep mints and tickers; words only when they spike
-                    words = {k: v for kind, k, v, _ in rows if kind == "biz_word"}
-                    rows = [r for r in rows if r[0] != "biz_word"] + biz_spikes.update(words)
+                rows = poll(name)
             except Exception as e:  # network or format trouble: log, retry in a minute
                 print(f"{name}: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
                 due[name] = now + 60
@@ -463,26 +532,37 @@ def run(path: Path = NOW_PATH) -> None:
             now_ms = int(time.time() * 1000)
             _save(name, rows, now_ms)
             update(state, rows, now_ms)
-            changed = True
-            due[name] = now + every
-        if x is not None:
-            for item in watch.new():
+            due[name] = now + every[name]
+        # Watched coins: X right away (paid, budgeted); GDELT and YouTube one at a time.
+        for item in watch.new():
+            queues["gdelt"].append(item)
+            if yt is not None:
+                queues["youtube"].append(item)
+            if x is not None:
                 try:
                     got = x.counts(item["mint"], item.get("name"), item.get("symbol"))
                 except Exception as e:
                     print(f"x: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-                    continue
-                if got is None:
-                    print("x: monthly budget used up; skipping until next month", flush=True)
-                    break
-                now_ms = int(time.time() * 1000)
-                rows = [(k, item["mint"], v, "") for k, v in got.items()]
-                _save("x", rows, now_ms)
-                update(state, rows, now_ms)
-                changed = True
-        if changed:
+                    got = None
+                coin("x", item, got)
+        if queues["gdelt"] and gdelt.ready():
+            item = queues["gdelt"].pop(0)
+            try:
+                coin("gdelt", item, gdelt.volume(item.get("name")))
+            except Exception as e:
+                print(f"gdelt: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        if queues["youtube"] and yt is not None and yt.can_search():
+            item = queues["youtube"].pop(0)
+            try:
+                coin("youtube", item, yt.videos_24h(item.get("name"), item.get("symbol")))
+            except Exception as e:
+                print(f"youtube: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        for q in queues.values():
+            del q[:-500]  # never let a backlog grow without bound
+        if state.get("updated_ms", 0) > state.get("written_ms", 0):
+            state["written_ms"] = state["updated_ms"]
             write_state(state, path)
-        time.sleep(TICK_S)
+        time.sleep(TICK_S if not queues["gdelt"] else 1)
 
 
 # Report ------------------------------------------------------------------------------
@@ -550,6 +630,17 @@ def report(root: Path) -> str:
         "reddit_trend",
         "x_posts_1h",
         "x_posts_24h",
+        "mastodon_tag",
+        "mastodon_mint",
+        "mastodon_ticker",
+        "mastodon_spike",
+        "farcaster_mint",
+        "farcaster_ticker",
+        "tg_mint",
+        "tg_ticker",
+        "gdelt_vol_24h",
+        "yt_videos_24h",
+        "yt_trend",
     ]
     for k in kinds:
         j = j.with_columns(pl.col("social").str.json_path_match(f"$.{k}").is_not_null().alias(k))

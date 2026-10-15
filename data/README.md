@@ -91,7 +91,9 @@ Hugging Face search, so it is either private or deleted. Slinky21 replaces it.
   searches (10 min), the Google Trends daily RSS feed for the US (15 min), the 4chan /biz/
   catalog (official read-only API, 1 min), Bluesky's Jetstream post stream (counts over
   the last hour, every 5 min) and Wikipedia's top English articles for the previous day
-  (6 h, the official pageview API). Sources and why others were left out:
+  (6 h, the official pageview API); Mastodon trends (15 min) and GDELT news volume for
+  watched coins (no keys); and, once the owner adds keys, Reddit, YouTube, Farcaster,
+  Telegram channels and paid X counts. Sources and why others were left out:
   `reports/2026-10-14-social-sources.md`.
 - **What:** every snapshot as `data/live/social/<source>/<UTC date>/<ms>.parquet` (kind,
   key, value, text, received_ms), deleted after `CRYPTOBOT_KEEP_DAYS`; the current state

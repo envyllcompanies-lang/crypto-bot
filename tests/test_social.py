@@ -122,3 +122,38 @@ def test_x_query_budget_and_summary(tmp_path, monkeypatch):
     monkeypatch.setenv("X_BEARER_TOKEN", "t")
     monkeypatch.setenv("X_MONTHLY_BUDGET_USD", "0")
     assert not xapi.configured()  # no budget, no spending
+
+
+def test_per_coin_results_are_matched_by_mint():
+    rows = [("x_posts_24h", "MintX", 12.0, ""), ("gdelt_vol_24h", "MintX", 0.4, ""),
+            ("yt_videos_24h", "MintX", 3.0, ""), ("reddit_mint", "MintX", 2.0, ""),
+            ("tg_mint", "MintX", 1.0, "")]  # fmt: skip
+    st = social.update({}, rows, 0)
+    got = social.signals(st, "MintX", "zz", "zz")
+    assert got["x_posts_24h"] == 12.0 and got["gdelt_vol_24h"] == 0.4
+    assert got["yt_videos_24h"] == 3.0 and got["reddit_mint"] == 2.0 and got["tg_mint"] == 1.0
+
+
+def test_free_source_parsers():
+    import json as j
+
+    from cryptobot import freesocial
+
+    tags = j.dumps([{"name": "FrustratedCartoons"}, {"name": "ab"}]).encode()
+    assert freesocial.mastodon_tags(tags) == [
+        ("mastodon_tag", "frustratedcartoons", 1.0, "FrustratedCartoons")
+    ]
+    assert freesocial.mastodon_texts(j.dumps([{"content": "<p>$BONK up</p>"}]).encode()) == [
+        " $BONK up "
+    ]
+    assert freesocial.gdelt_query("Christa Pike!") == '"Christa Pike"'
+    assert freesocial.gdelt_query("Dog") is None
+    vol = j.dumps({"timeline": [{"data": [{"value": 0.1}, {"value": 0.3}]}]}).encode()
+    assert freesocial.gdelt_volume(vol) == {"gdelt_vol_24h": 0.4, "gdelt_vol_last": 0.3}
+    assert freesocial.gdelt_volume(b"Please limit requests") is None
+
+
+def test_stream_counter_prefixes():
+    c = social.StreamCounter("tg")
+    c.add("aped $BONK", 0)
+    assert c.rows(1) == [("tg_ticker", "bonk", 1.0, "")]

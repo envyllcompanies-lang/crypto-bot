@@ -59,10 +59,10 @@ def norm(text: str | None) -> str:
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
-def _fetch(day: date) -> list[dict]:
+def _fetch(day: date, attempts: int = 8) -> list[dict]:
     url = WIKI_TOP.format(y=day.year, m=day.month, d=day.day)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    for attempt in range(8):
+    for attempt in range(attempts):
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.load(resp)["items"][0]["articles"]
@@ -73,12 +73,12 @@ def _fetch(day: date) -> list[dict]:
     raise RuntimeError(f"Wikipedia top articles for {day} failed")
 
 
-def wiki_top(day: date, cache: Path = ATTENTION) -> pl.DataFrame:
+def wiki_top(day: date, cache: Path = ATTENTION, attempts: int = 8) -> pl.DataFrame:
     """That day's top articles (article, views, rank), meta pages dropped; cached."""
     path = cache / f"wiki_top_{day:%Y-%m-%d}.parquet"
     if not path.exists():
         cache.mkdir(parents=True, exist_ok=True)
-        rows = _fetch(day)
+        rows = _fetch(day, attempts)
         time.sleep(2)
         df = pl.DataFrame(rows, schema={"article": pl.String, "views": pl.Int64, "rank": pl.Int64})
         df.write_parquet(path)
