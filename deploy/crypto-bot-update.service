@@ -1,0 +1,10 @@
+[Unit]
+Description=crypto-bot: pull new commits from GitHub, test, restart if they pass
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@DIR@
+ExecStart=/bin/bash @DIR@/deploy/update.sh

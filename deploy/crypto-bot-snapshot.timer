@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the crypto-bot snapshot every hour
+
+[Timer]
+OnCalendar=*-*-* *:25:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
