@@ -181,3 +181,43 @@ def test_reddit_rss_and_lemmy_parsing(monkeypatch):
     payload = {"posts": [{"post": {"name": "$PEPE", "body": None}}]}
     monkeypatch.setattr(freesocial, "_get", lambda url: json.dumps(payload).encode())
     assert freesocial.lemmy_texts("cryptocurrency") == ["$PEPE "]
+
+
+def test_tgweb_parses_preview_pages_and_counts_only_new_posts(monkeypatch):
+    from cryptobot import tgweb
+
+    page = (
+        '<div class="tgme_page_extra">12 345 subscribers</div>'
+        '<div class="tgme_widget_message_wrap"><div data-post="c/1">'
+        '<div class="tgme_widget_message_text js-message_text">old $BONK</div>'
+        '<time datetime="2026-10-15T10:00:00+00:00"></time></div>'
+        '<div class="tgme_widget_message_wrap"><div data-post="c/2">'
+        '<div class="tgme_widget_message_text">new &amp; $PEPE</div>'
+        '<time datetime="2026-10-15T11:00:00+00:00"></time></div>'
+    )
+    assert tgweb.members(page) == 12345
+    assert [(p[0], p[1]) for p in tgweb.posts(page)] == [
+        ("c/1", "old $BONK"),
+        ("c/2", "new & $PEPE"),
+    ]
+    assert tgweb.handle_of("https://t.me/coin_portal") == "coin_portal"
+    assert tgweb.handle_of("https://t.me/+invite") is None
+    assert tgweb.handle_of("https://t.me/somebot") is None
+    w = tgweb.TgWeb()
+    pages = iter([page, page + page.replace("c/2", "c/3")])
+    monkeypatch.setattr(w, "_get", lambda url: next(pages))
+    assert w.new_posts("c") == []  # first visit only sets the baseline
+    assert w.new_posts("c") == ["new & $PEPE"]  # c/3 is new
+
+
+def test_dex_token_counts_socials(monkeypatch):
+    from cryptobot import freesocial
+
+    pair = {"info": {"socials": [{"type": "twitter"}, {"type": "telegram"}], "websites": []},
+            "boosts": {"active": 2}}  # fmt: skip
+    monkeypatch.setattr(freesocial, "_get", lambda url: json.dumps([pair]).encode())
+    assert freesocial.dex_token("M") == {
+        "dex_socials": 2.0, "dex_websites": 0.0, "dex_boosts_active": 2.0
+    }  # fmt: skip
+    monkeypatch.setattr(freesocial, "_get", lambda url: b"[]")
+    assert freesocial.dex_token("M") is None

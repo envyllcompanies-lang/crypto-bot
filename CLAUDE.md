@@ -148,6 +148,8 @@ The owner wants X and other social accounts used to track virality and each toke
 | Mastodon trends, GDELT news (`freesocial.py`) | Trending tags and posts; news volume for watched coins | Free, no key | Built, always on |
 | Imgflip meme templates, Hacker News front page (`social.py`) | Meme-name keywords; title word spikes | Free, no key | Built, always on |
 | YouTube Data API, Farcaster via Neynar (`freesocial.py`) | Popular-video title spikes and watched-coin video counts; trending casts | Free keys in `.env` | Built, off until keys are added |
+| Telegram web previews (`tgweb.py`) | Each watched coin's own Telegram (members, posts last hour); call channels listed in `TELEGRAM_WEB_CHANNELS` | Free, no account: t.me's public preview pages, read slowly | Built, always on |
+| DexScreener token endpoint (`freesocial.py`) | Socials, websites and active boosts registered for each watched coin | Free, no key | Built, always on |
 | Telegram public channels (`telegram_feed.py`, Telethon) | Mints and $TICKERs in channels the owner lists | Free; the owner's account, with a ban risk the owner accepts | Built, off until the owner logs in on the server |
 | X API counts (`xapi.py`) | Hourly post counts for watched coins | Paid: about $0.005 a request (Oct 2026, third-party figure); owner sets `X_MONTHLY_BUDGET_USD` | Built, off until a token and budget are set |
 

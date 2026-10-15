@@ -36,8 +36,13 @@ website:
   free keys) and **Telegram public channels** (telegram_feed.py; the owner's account,
   read-only, with a ban risk the owner accepts by setting it up).
 
-Pump.fun's own comments are left out (its frontend API is undocumented), and so are X
-scrapers, which break X's terms (reports/2026-10-14-social-sources.md).
+- **Telegram web previews** (tgweb.py, no account): each watched coin's own Telegram
+  (members, posts in the last hour) and public call channels the owner lists in
+  TELEGRAM_WEB_CHANNELS, scraped slowly from t.me's public preview pages.
+
+X and TikTok are not scraped: every working method needs logged-in accounts or defeats
+their anti-bot measures. Pump.fun's own comments are left out too: its frontend API is
+undocumented and CLAUDE.md rules out scripting the site (reports/2026-10-14-social-sources.md).
 
 `run` polls the sources, saves every snapshot under data/live/social/<source>/<date>/,
 and keeps a compact current state in data/derived/social_now.json. The paper trader
@@ -63,7 +68,7 @@ from pathlib import Path
 
 import polars as pl
 
-from cryptobot import freesocial, reddit, telegram_feed, xapi
+from cryptobot import freesocial, reddit, telegram_feed, tgweb, xapi
 from cryptobot.attention import MIN_KEY_CHARS, keys, norm, wiki_top
 from cryptobot.recorder import LIVE
 
@@ -106,6 +111,12 @@ MINT_SOURCES = (  # kinds whose key is a mint address (the rest are keywords)
     "mastodon_mint",
     "farcaster_mint",
     "tg_mint",
+    "tgweb_mint",
+    "tg_members",
+    "tg_posts_1h",
+    "dex_socials",
+    "dex_websites",
+    "dex_boosts_active",
     "lemmy_mint",
     "x_posts_1h",
     "x_posts_24h",
@@ -489,6 +500,11 @@ def run(path: Path = NOW_PATH) -> None:
     }
     if telegram_feed.configured():
         every["telegram"] = BSKY_EVERY_S
+    tw = tgweb.TgWeb()
+    tw_channels = tgweb.channels()
+    tw_counter = StreamCounter("tgweb")
+    tw_next = {c: 0.0 for c in tw_channels}  # each listed channel once every 5 minutes
+    every["tgweb_channels"] = BSKY_EVERY_S
     if red is not None:
         every |= {"reddit_new": REDDIT_NEW_EVERY_S, "reddit_popular": REDDIT_POPULAR_EVERY_S}
     else:  # no keys: Reddit's public RSS feeds, polled gently
@@ -503,12 +519,13 @@ def run(path: Path = NOW_PATH) -> None:
         every["farcaster"] = FARCASTER_EVERY_S
     due = {name: 0.0 for name in every}
     watch = Watchlist()
-    queues: dict[str, list[dict]] = {"gdelt": [], "youtube": []}
+    queues: dict[str, list[dict]] = {"gdelt": [], "youtube": [], "tgweb": [], "dex": []}
     on = {
         "reddit": "api" if red is not None else "rss (no keys)",
         "youtube": yt is not None,
         "farcaster": farcaster,
         "telegram": telegram_feed.configured(),
+        "telegram web channels": f"{len(tw_channels)} listed",
         "x": x is not None,
     }
     print("social sources with keys: " + ", ".join(
@@ -524,6 +541,8 @@ def run(path: Path = NOW_PATH) -> None:
             return bsky.rows(now_ms)
         if name == "telegram":
             return tg.rows(now_ms)
+        if name == "tgweb_channels":
+            return tw_counter.rows(now_ms)
         if name == "reddit_new":
             texts = red.new_posts() if red is not None else reddit.rss_new_posts()
             rows, words = count_texts(texts, "reddit")
@@ -588,6 +607,9 @@ def run(path: Path = NOW_PATH) -> None:
         # Watched coins: X right away (paid, budgeted); GDELT and YouTube one at a time.
         for item in watch.new():
             queues["gdelt"].append(item)
+            queues["dex"].append(item)
+            if item.get("uri"):
+                queues["tgweb"].append(item)
             if yt is not None:
                 queues["youtube"].append(item)
             if x is not None:
@@ -597,6 +619,12 @@ def run(path: Path = NOW_PATH) -> None:
                     print(f"x: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
                     got = None
                 coin("x", item, got)
+        if queues["dex"]:  # free, ~300 a minute: one per loop is far under the limit
+            item = queues["dex"].pop(0)
+            try:
+                coin("dex", item, freesocial.dex_token(item["mint"]))
+            except Exception as e:
+                print(f"dex: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         if queues["gdelt"] and gdelt.ready():
             item = queues["gdelt"].pop(0)
             try:
@@ -609,12 +637,27 @@ def run(path: Path = NOW_PATH) -> None:
                 coin("youtube", item, yt.videos_24h(item.get("name"), item.get("symbol")))
             except Exception as e:
                 print(f"youtube: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        # Telegram web previews: one request at a time, TGWEB_GAP_S apart; listed call
+        # channels first (each every 5 minutes), then watched coins' own Telegrams.
+        if tw.ready():
+            due_channels = [c for c in tw_channels if tw_next[c] <= now]
+            try:
+                if due_channels:
+                    c = due_channels[0]
+                    tw_next[c] = now + BSKY_EVERY_S
+                    for text in tw.new_posts(c):
+                        tw_counter.add(text, int(time.time() * 1000))
+                elif queues["tgweb"]:
+                    item = queues["tgweb"].pop(0)
+                    coin("tgweb", item, tw.coin(item.get("uri")))
+            except Exception as e:
+                print(f"tgweb: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         for q in queues.values():
             del q[:-500]  # never let a backlog grow without bound
         if state.get("updated_ms", 0) > state.get("written_ms", 0):
             state["written_ms"] = state["updated_ms"]
             write_state(state, path)
-        time.sleep(TICK_S if not queues["gdelt"] else 1)
+        time.sleep(TICK_S if not (queues["gdelt"] or queues["tgweb"] or tw_channels) else 1)
 
 
 # Report ------------------------------------------------------------------------------
@@ -694,6 +737,11 @@ def report(root: Path) -> str:
         "farcaster_ticker",
         "tg_mint",
         "tg_ticker",
+        "tgweb_mint",
+        "tgweb_ticker",
+        "tg_members",
+        "tg_posts_1h",
+        "dex_socials",
         "gdelt_vol_24h",
         "yt_videos_24h",
         "yt_trend",

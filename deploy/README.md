@@ -143,7 +143,18 @@ it to `.env`:
 NEYNAR_API_KEY=...
 ```
 
-**Telegram public channels (free, uses your own account; read the risk first).**
+**Telegram call channels without an account (free, no risk to an account).** The bot
+reads Telegram's public preview pages (t.me/s/name). To have it count coin mentions in
+public call channels, list them in `.env`:
+
+```
+TELEGRAM_WEB_CHANNELS=channelname1,channelname2
+```
+
+Each watched coin's own Telegram (members, posts in the last hour) is read automatically
+from its metadata link; nothing to set.
+
+**Telegram through your own account (optional; read the risk first).**
 
 Telegram allows this API, but accounts logged in through third-party apps can be flagged
 or banned. Its terms added a data-scraping clause in Feb 2026. Use an account you can

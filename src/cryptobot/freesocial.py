@@ -177,3 +177,26 @@ def lemmy_texts(community: str | None = None, sort: str = "New", limit: int = 50
     return [
         f"{p['post'].get('name', '')} {p['post'].get('body') or ''}" for p in got.get("posts", [])
     ]
+
+
+# DexScreener per coin ---------------------------------------------------------------
+#
+# The free token endpoint (no key, about 300 requests a minute) returns a coin's pairs
+# with the social links and websites registered for it on DexScreener and its paid
+# boosts. A coin someone bothered (and paid) to fill in there is a coin with a team or
+# community behind it.
+
+DEX_TOKEN = "https://api.dexscreener.com/tokens/v1/solana/"
+
+
+def dex_token(mint: str) -> dict | None:
+    got = json.loads(_get(DEX_TOKEN + mint))
+    if not got:
+        return None
+    pair = got[0]
+    info = pair.get("info") or {}
+    return {
+        "dex_socials": float(len(info.get("socials") or [])),
+        "dex_websites": float(len(info.get("websites") or [])),
+        "dex_boosts_active": float((pair.get("boosts") or {}).get("active", 0)),
+    }

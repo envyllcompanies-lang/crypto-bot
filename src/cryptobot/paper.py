@@ -428,6 +428,7 @@ class Engine:
             return
         self.watched.add(tok.mint)
         line = {"mint": tok.mint, "name": tok.name, "symbol": tok.symbol, "ts_ms": ts}
+        line["uri"] = tok.uri  # metadata link, for the coin's own Telegram (tgweb.py)
         line["universe"] = universe
         with self.watch_path.open("a") as f:
             f.write(json.dumps(line) + "\n")
