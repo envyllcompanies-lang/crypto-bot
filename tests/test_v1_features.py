@@ -171,3 +171,42 @@ def test_every_default_variant_sells_a_token_gone_quiet():
 
 def names_of(grid):
     return {v.name for v in grid}
+
+
+def test_validity_measures_wash_bundle_insider_and_coordinated_sells():
+    from cryptobot.curve import INITIAL_VIRTUAL_SOL, INITIAL_VIRTUAL_TOKENS, TOTAL_SUPPLY, Curve
+    from cryptobot.features import TokenState
+
+    tok = TokenState.from_create(
+        {"mint": "m", "creator": "dev", "received_ms": 0, "slot": 100,
+         "virtual_sol_reserves": INITIAL_VIRTUAL_SOL,
+         "virtual_token_reserves": INITIAL_VIRTUAL_TOKENS}
+    )  # fmt: skip
+    curve = Curve()
+
+    def trade(user, slot, buy, amount):
+        nonlocal curve
+        if buy:
+            curve, tokens, sol = curve.after_buy(amount)
+        else:
+            tokens = amount
+            curve, sol = curve.after_sell(tokens)
+        tok.apply_trade(
+            {"user": user, "slot": slot, "is_buy": buy, "sol_amount": sol,
+             "token_amount": tokens, "virtual_sol_reserves": curve.virtual_sol,
+             "virtual_token_reserves": curve.virtual_tokens, "received_ms": slot}
+        )  # fmt: skip
+        return tokens
+
+    held = {w: trade(w, 100, True, 10**9) for w in ("a", "b", "c")}  # a launch-slot bundle
+    assert tok.bundle_share == sum(held.values()) / TOTAL_SUPPLY
+    assert tok.insider_sold_share == 0.0  # the bundle still holds
+    w = trade("washer", 120, True, 10**8)
+    trade("washer", 120, False, w)  # bought and sold in one slot
+    assert tok.wash_share > 0
+    for wallet in ("a", "b", "c"):  # three big holders sell in one slot
+        trade(wallet, 130, False, held[wallet])
+    assert tok.coordinated_sells == 1
+    assert tok.insider_sold_share == 1.0
+    snap = tok.snapshot(200)
+    assert {"wash_share", "bundle_share", "insider_sold_share", "coordinated_sells"} <= set(snap)

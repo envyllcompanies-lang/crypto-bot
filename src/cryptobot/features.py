@@ -31,6 +31,11 @@ EARLY_BUYERS = 10
 # Copycats: a launch reusing a name or symbol seen in this window. Originals graduate
 # about ten times as often as copycats (research report); the window is our choice.
 SHOWN_CHARS = 40  # creator-written names are cut to this in logs
+# Validity measures (reports/2026-10-14-social-sources.md, "Coin validity"):
+BUNDLE_SLOTS = 3  # a bundle is bought in the launch slot or the next few
+BUNDLE_MIN_WALLETS = 3  # ...by at least this many wallets in one slot
+BIG_HOLDER_SHARE = 0.005  # a "big holder" holds at least 0.5% of supply
+COORDINATED_MIN = 3  # big holders selling in the same slot
 COPYCAT_WINDOW_MS = 24 * 60 * 60 * 1000
 COPYCAT_MAX_KEYS = 400_000  # memory bound: about 2 days of launches at today's rate
 
@@ -104,6 +109,15 @@ class TokenState:
     # live: None = not known (no file loaded yet).
     creator_graduates: int | None = None  # earlier launches of this creator that graduated
     creator_recent_launch: bool | None = None  # another launch by them in the 7 days before
+    # Validity measures from the trade stream (logged, not traded on; see snapshot()).
+    volume_lamports: int = 0
+    wash_lamports: int = 0  # buys and sells by one wallet within one slot
+    last_buy_slot: dict[str, int] = field(default_factory=dict)
+    insider_bought_tokens: int = 0
+    slot_buys: dict[int, dict[str, int]] = field(default_factory=dict)  # early slots only
+    bundle_share: float = 0.0  # most supply bought in one slot by BUNDLE_MIN_WALLETS+
+    sell_slots: dict[int, set[str]] = field(default_factory=dict)  # big sellers by slot
+    coordinated_sells: int = 0  # slots where COORDINATED_MIN big holders sold together
 
     @classmethod
     def from_create(cls, row: dict) -> TokenState:
@@ -138,6 +152,27 @@ class TokenState:
         self.last_ts_ms = row["received_ms"]
         self.n_trades += 1
         user = row["user"]
+        slot = row["slot"]
+        self.volume_lamports += sol
+        if is_buy:
+            self.last_buy_slot[user] = slot
+            if slot <= self.create_slot + BUNDLE_SLOTS and user != self.creator:
+                buys = self.slot_buys.setdefault(slot, {})
+                buys[user] = buys.get(user, 0) + tokens
+                if len(buys) >= BUNDLE_MIN_WALLETS:
+                    share = sum(buys.values()) / TOTAL_SUPPLY
+                    self.bundle_share = max(self.bundle_share, share)
+        else:
+            if self.last_buy_slot.get(user) == slot:
+                self.wash_lamports += 2 * sol  # the round trip counts on both sides
+            if self.balances.get(user, 0) >= BIG_HOLDER_SHARE * TOTAL_SUPPLY:
+                sellers = self.sell_slots.setdefault(slot, set())
+                sellers.add(user)
+                if len(sellers) == COORDINATED_MIN:
+                    self.coordinated_sells += 1
+                if len(self.sell_slots) > 50:  # keep only recent slots
+                    for old in sorted(self.sell_slots)[:-20]:
+                        del self.sell_slots[old]
         if is_buy:
             self.balances[user] = self.balances.get(user, 0) + tokens
             was = self.bought.get(user, 0)
@@ -146,6 +181,7 @@ class TokenState:
                 self.pro_traders += 1
             if user != self.creator and row["slot"] <= self.create_slot + INSIDER_SLOTS:
                 self.insiders.add(user)
+                self.insider_bought_tokens += tokens
             if (
                 user != self.creator
                 and len(self.early_buyers) < EARLY_BUYERS
@@ -194,6 +230,19 @@ class TokenState:
         buys moved it (graduates take fewer trades to reach a level, arXiv 2602.14860)."""
         return self.n_trades / max(self.curve.progress * 100, 1.0)
 
+    @property
+    def wash_share(self) -> float:
+        """Share of SOL volume from wallets that bought and sold in the same slot."""
+        return self.wash_lamports / self.volume_lamports if self.volume_lamports else 0.0
+
+    @property
+    def insider_sold_share(self) -> float:
+        """How much of what launch-slot insiders bought they no longer hold."""
+        if not self.insider_bought_tokens:
+            return 0.0
+        held = sum(self.balances.get(w, 0) for w in self.insiders)
+        return max(0.0, 1 - held / self.insider_bought_tokens)
+
     def tracked_holders(self, tracked: frozenset[str]) -> int:
         """How many wallets on the tracked list hold this token now."""
         return sum(1 for w, b in self.balances.items() if b > 0 and w in tracked)
@@ -228,4 +277,8 @@ class TokenState:
             "trades_per_progress_pct": round(self.trades_per_progress_pct, 2),
             "creator_graduates": self.creator_graduates,
             "creator_recent_launch": self.creator_recent_launch,
+            "wash_share": round(self.wash_share, 4),
+            "bundle_share": round(self.bundle_share, 4),
+            "insider_sold_share": round(self.insider_sold_share, 4),
+            "coordinated_sells": self.coordinated_sells,
         }

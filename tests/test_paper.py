@@ -505,7 +505,7 @@ def test_gate_records_carry_the_social_signals(tmp_path):
     eng.finish()
     gates = read_table(tmp_path, "gates")
     social = json.loads(gates["features"][0])["social"]
-    assert social == {"loaded": True, "dex_boosts": 20.0, "any": True}
+    assert social == {"loaded": True, "dex_boosts": 20.0, "any": True, "sources": 1}
 
 
 def test_live_engine_puts_late_curve_candidates_on_the_watchlist(tmp_path):

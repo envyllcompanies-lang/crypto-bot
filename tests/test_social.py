@@ -37,9 +37,9 @@ def test_state_expires_old_signals_and_keeps_best_ranks():
 def test_signals_match_mint_name_and_ticker():
     st = social.update({}, [("dex_boosts", "M", 10.0, ""), ("wiki_top", "pike", 3.0, "")], 0)
     assert social.signals(st, "M", "Pike!", "PK") == {
-        "loaded": True, "dex_boosts": 10.0, "wiki_top": 3.0, "any": True
+        "loaded": True, "dex_boosts": 10.0, "wiki_top": 3.0, "any": True, "sources": 2
     }  # fmt: skip
-    assert social.signals(st, "other", "zzz", "") == {"loaded": True, "any": False}
+    assert social.signals(st, "other", "zzz", "") == {"loaded": True, "any": False, "sources": 0}
     assert social.signals(None, "M", "", "") == {"loaded": False}
 
 
@@ -157,3 +157,11 @@ def test_stream_counter_prefixes():
     c = social.StreamCounter("tg")
     c.add("aped $BONK", 0)
     assert c.rows(1) == [("tg_ticker", "bonk", 1.0, "")]
+
+
+def test_imgflip_and_hn_parsers():
+    raw = json.dumps({"data": {"memes": [{"name": "Drake Hotline Bling"}]}}).encode()
+    assert social.parse_imgflip(raw) == [
+        ("imgflip_meme", "drakehotlinebling", 1.0, "Drake Hotline Bling")
+    ]
+    assert social.hn_titles(json.dumps({"hits": [{"title": "A"}]}).encode()) == ["A"]
