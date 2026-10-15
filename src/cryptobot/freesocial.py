@@ -158,3 +158,22 @@ def neynar_configured() -> bool:
 def farcaster_texts() -> list[str]:
     raw = _get(f"{NEYNAR}?limit=10", {"x-api-key": os.environ["NEYNAR_API_KEY"]})
     return [c.get("text") or "" for c in json.loads(raw).get("casts", [])]
+
+
+# Lemmy -------------------------------------------------------------------------------
+#
+# An open, federated Reddit-like network with a free API and no key. Smaller than
+# Reddit, but crypto communities exist (lemmy.world/c/cryptocurrency).
+
+LEMMY = "https://lemmy.world/api/v3/post/list"
+LEMMY_COMMUNITIES = ("cryptocurrency",)
+
+
+def lemmy_texts(community: str | None = None, sort: str = "New", limit: int = 50) -> list[str]:
+    params = {"sort": sort, "limit": limit}
+    if community:
+        params["community_name"] = community
+    got = json.loads(_get(f"{LEMMY}?{urllib.parse.urlencode(params)}"))
+    return [
+        f"{p['post'].get('name', '')} {p['post'].get('body') or ''}" for p in got.get("posts", [])
+    ]

@@ -22,8 +22,11 @@ website:
 - **Bluesky** posts (Jetstream, free, no login): mint addresses and $TICKERs counted
   over the last hour.
 
-- **Reddit** (reddit.py, the official Data API; off until the owner adds free app keys):
-  mints, $TICKERs and word spikes in memecoin subreddits, and word spikes in r/popular.
+- **Reddit** (reddit.py): the official Data API with the owner's free app keys, or,
+  without keys, Reddit's public RSS feeds (no login): mints, $TICKERs and word spikes in
+  memecoin subreddits, and word spikes in r/popular.
+- **Lemmy** (freesocial.py, free API, no key): mints and $TICKERs in its crypto community
+  and word spikes in its hot posts.
 - **X** (xapi.py, the official API; paid, off until the owner sets a bearer token and a
   monthly budget): hourly post counts over 24 hours for each coin on the paper trader's
   watchlist, one counts request per coin, never reading posts.
@@ -71,6 +74,10 @@ WATCH_PATH = LIVE.parent / "derived" / "watch.jsonl"
 X_BUDGET_PATH = LIVE.parent / "derived" / "x_budget.json"
 REDDIT_NEW_EVERY_S = 120
 REDDIT_POPULAR_EVERY_S = 600
+REDDIT_RSS_NEW_EVERY_S = 300  # keyless RSS: gentler than the API
+REDDIT_RSS_POPULAR_EVERY_S = 900
+LEMMY_EVERY_S = 600
+LEMMY_HOT_EVERY_S = 1800
 USER_AGENT = (
     "crypto-bot-research/0.1 (private research; github.com/envyllcompanies-lang/crypto-bot)"
 )
@@ -99,6 +106,7 @@ MINT_SOURCES = (  # kinds whose key is a mint address (the rest are keywords)
     "mastodon_mint",
     "farcaster_mint",
     "tg_mint",
+    "lemmy_mint",
     "x_posts_1h",
     "x_posts_24h",
     "gdelt_vol_24h",
@@ -472,6 +480,7 @@ def run(path: Path = NOW_PATH) -> None:
         "mastodon": Spikes("mastodon_spike", alpha=1 / 96, warmup=4),  # every 15 min
         "yt_popular": Spikes("yt_trend", alpha=1 / 48, warmup=4),  # every 30 min
         "hn": Spikes("hn_trend", alpha=1 / 48, warmup=4),  # every 30 min
+        "lemmy_hot": Spikes("lemmy_trend", alpha=1 / 48, warmup=4),  # every 30 min
     }
     every = {name: secs for name, (_, secs) in SOURCES.items()} | {
         "wiki_top": WIKI_EVERY_S,
@@ -482,6 +491,12 @@ def run(path: Path = NOW_PATH) -> None:
         every["telegram"] = BSKY_EVERY_S
     if red is not None:
         every |= {"reddit_new": REDDIT_NEW_EVERY_S, "reddit_popular": REDDIT_POPULAR_EVERY_S}
+    else:  # no keys: Reddit's public RSS feeds, polled gently
+        every |= {
+            "reddit_new": REDDIT_RSS_NEW_EVERY_S,
+            "reddit_popular": REDDIT_RSS_POPULAR_EVERY_S,
+        }
+    every |= {"lemmy": LEMMY_EVERY_S, "lemmy_hot": LEMMY_HOT_EVERY_S}
     if yt is not None:
         every["yt_popular"] = YT_POPULAR_EVERY_S
     if farcaster:
@@ -490,14 +505,15 @@ def run(path: Path = NOW_PATH) -> None:
     watch = Watchlist()
     queues: dict[str, list[dict]] = {"gdelt": [], "youtube": []}
     on = {
-        "reddit": red is not None,
+        "reddit": "api" if red is not None else "rss (no keys)",
         "youtube": yt is not None,
         "farcaster": farcaster,
         "telegram": telegram_feed.configured(),
         "x": x is not None,
     }
-    print("social sources with keys: " + ", ".join(f"{k} {'on' if v else 'off'}"
-          for k, v in on.items()), flush=True)  # fmt: skip
+    print("social sources with keys: " + ", ".join(
+        f"{k} {v if isinstance(v, str) else ('on' if v else 'off')}" for k, v in on.items()
+    ), flush=True)  # fmt: skip
     print("social collector started", flush=True)
 
     def poll(name: str) -> list[tuple[str, str, float, str]]:
@@ -509,12 +525,20 @@ def run(path: Path = NOW_PATH) -> None:
         if name == "telegram":
             return tg.rows(now_ms)
         if name == "reddit_new":
-            assert red is not None
-            rows, words = count_texts(red.new_posts(), "reddit")
+            texts = red.new_posts() if red is not None else reddit.rss_new_posts()
+            rows, words = count_texts(texts, "reddit")
             return rows + spikes[name].update(words)
         if name == "reddit_popular":
-            assert red is not None
-            _, words = count_texts(red.popular_titles(), "popular")
+            texts = red.popular_titles() if red is not None else reddit.rss_popular_titles()
+            _, words = count_texts(texts, "popular")
+            return spikes[name].update(words, min_count=2, ratio=3.0)
+        if name == "lemmy":
+            rows = []
+            for community in freesocial.LEMMY_COMMUNITIES:
+                rows += count_texts(freesocial.lemmy_texts(community), "lemmy", words=False)[0]
+            return rows
+        if name == "lemmy_hot":
+            _, words = count_texts(freesocial.lemmy_texts(sort="Hot"), "lemmy")
             return spikes[name].update(words, min_count=2, ratio=3.0)
         if name == "mastodon":
             tags = freesocial.mastodon_tags(freesocial._get(f"{freesocial.MASTODON}/tags?limit=20"))
@@ -554,7 +578,8 @@ def run(path: Path = NOW_PATH) -> None:
                 rows = poll(name)
             except Exception as e:  # network or format trouble: log, retry in a minute
                 print(f"{name}: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-                due[name] = now + 60
+                keyless_reddit = name.startswith("reddit") and red is None
+                due[name] = now + (300 if keyless_reddit else 60)  # RSS: back off longer
                 continue
             now_ms = int(time.time() * 1000)
             _save(name, rows, now_ms)
@@ -674,6 +699,9 @@ def report(root: Path) -> str:
         "yt_trend",
         "hn_trend",
         "imgflip_meme",
+        "lemmy_mint",
+        "lemmy_ticker",
+        "lemmy_trend",
     ]
     for k in kinds:
         j = j.with_columns(pl.col("social").str.json_path_match(f"$.{k}").is_not_null().alias(k))

@@ -143,7 +143,8 @@ The owner wants X and other social accounts used to track virality and each toke
 | Our own recorder on a Solana RPC websocket | Forward data we control | Free: public RPC, no key (Helius free tier as a fallback) | Built (M5, `recorder.py`); checked in the M5 report |
 | PumpPortal websocket | New-token and migration events | Free; token trades metered | Optional |
 | PumpFunData archive | Hourly Parquet since Feb 2026 | About $24 a month of data | Ask before buying |
-| Reddit Data API (`reddit.py`) | Memecoin subreddits and r/popular, for `social.py` | Free (non-commercial); owner's app keys in `.env` | Built, off until keys are added |
+| Reddit (`reddit.py`) | Memecoin subreddits and r/popular, for `social.py` | Free: the Data API with the owner's app keys, or Reddit's public RSS feeds with none | Built; RSS until keys are added |
+| Lemmy (`freesocial.py`) | Crypto community posts and hot-post word spikes | Free, no key | Built, always on |
 | Mastodon trends, GDELT news (`freesocial.py`) | Trending tags and posts; news volume for watched coins | Free, no key | Built, always on |
 | Imgflip meme templates, Hacker News front page (`social.py`) | Meme-name keywords; title word spikes | Free, no key | Built, always on |
 | YouTube Data API, Farcaster via Neynar (`freesocial.py`) | Popular-video title spikes and watched-coin video counts; trending casts | Free keys in `.env` | Built, off until keys are added |

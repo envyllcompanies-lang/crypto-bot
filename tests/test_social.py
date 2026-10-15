@@ -165,3 +165,19 @@ def test_imgflip_and_hn_parsers():
         ("imgflip_meme", "drakehotlinebling", 1.0, "Drake Hotline Bling")
     ]
     assert social.hn_titles(json.dumps({"hits": [{"title": "A"}]}).encode()) == ["A"]
+
+
+def test_reddit_rss_and_lemmy_parsing(monkeypatch):
+    from cryptobot import freesocial, reddit
+
+    feed = (
+        b'<feed><entry><title>$BONK &amp; friends</title><content type="html">'
+        b"&lt;p&gt;buy 9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin&lt;/p&gt;</content>"
+        b"</entry></feed>"
+    )
+    texts = reddit.rss_texts(feed)
+    assert texts[0].startswith("$BONK & friends")
+    assert "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin" in texts[0]
+    payload = {"posts": [{"post": {"name": "$PEPE", "body": None}}]}
+    monkeypatch.setattr(freesocial, "_get", lambda url: json.dumps(payload).encode())
+    assert freesocial.lemmy_texts("cryptocurrency") == ["$PEPE "]

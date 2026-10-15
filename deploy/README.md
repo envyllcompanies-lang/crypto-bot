@@ -105,7 +105,8 @@ Setup:
 Each is off until you add keys to `.env` on the server (`nano ~/crypto-bot/.env`), then
 run `sudo systemctl restart crypto-bot-social`. Never paste keys into chat.
 
-**Reddit (free, non-commercial).**
+**Reddit (free, non-commercial).** Without keys the bot already reads Reddit's public RSS
+feeds; app keys give it the official API with higher limits.
 
 1. Signed in to Reddit, open https://www.reddit.com/prefs/apps and choose "create another
    app...".

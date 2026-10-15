@@ -93,7 +93,8 @@ Hugging Face search, so it is either private or deleted. Slinky21 replaces it.
   the last hour, every 5 min) and Wikipedia's top English articles for the previous day
   (6 h, the official pageview API); Imgflip's top meme templates (6 h) and Hacker News'
   front page (30 min); Mastodon trends (15 min) and GDELT news volume for
-  watched coins (no keys); and, once the owner adds keys, Reddit, YouTube, Farcaster,
+  watched coins, Reddit's public RSS feeds and Lemmy (no keys); and, once the owner adds
+  keys, the Reddit API, YouTube, Farcaster,
   Telegram channels and paid X counts. Sources and why others were left out:
   `reports/2026-10-14-social-sources.md`.
 - **What:** every snapshot as `data/live/social/<source>/<UTC date>/<ms>.parquet` (kind,
