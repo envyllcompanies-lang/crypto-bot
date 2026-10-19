@@ -40,9 +40,13 @@ website:
   (members, posts in the last hour) and public call channels the owner lists in
   TELEGRAM_WEB_CHANNELS, scraped slowly from t.me's public preview pages.
 
-X and TikTok are not scraped: every working method needs logged-in accounts or defeats
-their anti-bot measures. Pump.fun's own comments are left out too: its frontend API is
-undocumented and CLAUDE.md rules out scripting the site (reports/2026-10-14-social-sources.md).
+- **Pump.fun live streams** (its public `coins/currently-live` list, plain JSON, every 5
+  minutes): `pf_live` is a coin's peak viewer count while streaming, `pf_flagged` marks
+  a stream pump.fun's own security verdict didn't "allow".
+
+X and TikTok are not scraped yet: every working method needs a logged-in account or
+defeats their anti-bot measures. Pump.fun comments are left out: the old public
+endpoint is gone and the current one is not known.
 
 `run` polls the sources, saves every snapshot under data/live/social/<source>/<date>/,
 and keeps a compact current state in data/derived/social_now.json. The paper trader
@@ -99,6 +103,12 @@ SOURCES = {
     # Free, no key: the 100 most-captioned meme templates, and Hacker News' front page.
     "imgflip": ("https://api.imgflip.com/get_memes", 6 * 3600),
     "hn": ("https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=50", 1800),
+    # Pump.fun's public list of coins streaming live right now (plain JSON, no key, no
+    # challenge): viewers, stream title, pump.fun's own security verdict.
+    "pf_live": (
+        "https://frontend-api-v3.pump.fun/coins/currently-live?limit=50&offset=0&includeNsfw=false",
+        300,
+    ),
 }
 MINT_SOURCES = (  # kinds whose key is a mint address (the rest are keywords)
     "dex_boosts",
@@ -123,6 +133,8 @@ MINT_SOURCES = (  # kinds whose key is a mint address (the rest are keywords)
     "gdelt_vol_24h",
     "gdelt_vol_last",
     "yt_videos_24h",
+    "pf_live",
+    "pf_flagged",
 )
 MASTODON_EVERY_S = 900
 YT_POPULAR_EVERY_S = 1800
@@ -192,6 +204,23 @@ def parse_cg(raw: bytes) -> list[tuple[str, str, float, str]]:
         for k in {norm(item.get("name")), norm(item.get("symbol"))}:
             if len(k) >= MIN_KEY_CHARS:
                 rows.append(("cg_trending", k, float(rank), item.get("name") or ""))
+    return rows
+
+
+def parse_pf_live(raw: bytes) -> list[tuple[str, str, float, str]]:
+    """Coins streaming on pump.fun now: `pf_live` = viewers (the state keeps the peak),
+    and `pf_flagged` when pump.fun's own security verdict is anything but "allow"."""
+    rows = []
+    for coin in json.loads(raw):
+        mint = coin.get("mint")
+        if not mint:
+            continue
+        viewers = float(coin.get("num_participants") or 0)
+        rows.append(("pf_live", mint, viewers, coin.get("livestream_title") or ""))
+        verdict = coin.get("security_verdict") or {}
+        if verdict.get("verdict") not in (None, "allow"):
+            reasons = ",".join(verdict.get("reasons") or [])
+            rows.append(("pf_flagged", mint, 1.0, f"{verdict.get('verdict')}: {reasons}"))
     return rows
 
 
@@ -402,8 +431,9 @@ def update(state: dict, rows: list[tuple[str, str, float, str]], now_ms: int) ->
         bucket = "mints" if kind in MINT_SOURCES else "keywords"
         entry = state.setdefault(bucket, {}).setdefault(key, {})
         old = entry.get(kind)
-        if kind == "dex_boosts":
-            value = max(value, old[0]) if old else value  # totalAmount is cumulative
+        if kind in ("dex_boosts", "pf_live"):
+            # totalAmount is cumulative; for a live stream, keep its peak audience
+            value = max(value, old[0]) if old else value
         elif kind in ("gt_trending", "google_trends", "wiki_top", "cg_trending") and old:
             value = min(value, old[0])  # best rank seen
         entry[kind] = [value, now_ms]
@@ -464,6 +494,7 @@ PARSERS = {
     "cg_trending": parse_cg,
     "biz": parse_biz,
     "imgflip": parse_imgflip,
+    "pf_live": parse_pf_live,
 }
 
 
@@ -750,6 +781,8 @@ def report(root: Path) -> str:
         "lemmy_mint",
         "lemmy_ticker",
         "lemmy_trend",
+        "pf_live",
+        "pf_flagged",
     ]
     for k in kinds:
         j = j.with_columns(pl.col("social").str.json_path_match(f"$.{k}").is_not_null().alias(k))

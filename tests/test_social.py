@@ -221,3 +221,24 @@ def test_dex_token_counts_socials(monkeypatch):
     }  # fmt: skip
     monkeypatch.setattr(freesocial, "_get", lambda url: b"[]")
     assert freesocial.dex_token("M") is None
+
+
+def test_pumpfun_live_streams_keep_peak_viewers_and_flags():
+    page = [  # fields as pump.fun's coins/currently-live returns them (sample of 19 Oct)
+        {"mint": "MintA", "num_participants": 19, "livestream_title": "GTA",
+         "security_verdict": {"verdict": "allow", "reasons": ["benign"]}},
+        {"mint": "MintB", "num_participants": None, "livestream_title": None,
+         "security_verdict": {"verdict": "block", "reasons": ["impersonation"]}},
+        {"name": "no mint"},
+    ]  # fmt: skip
+    rows = social.parse_pf_live(json.dumps(page).encode())
+    assert rows == [
+        ("pf_live", "MintA", 19.0, "GTA"),
+        ("pf_live", "MintB", 0.0, ""),
+        ("pf_flagged", "MintB", 1.0, "block: impersonation"),
+    ]
+    st = social.update({}, rows, 0)
+    st = social.update(st, [("pf_live", "MintA", 5.0, "")], 1000)  # audience shrank
+    sig = social.signals(st, "MintA", None, None)
+    assert sig["pf_live"] == 19.0 and sig["sources"] == 1
+    assert social.signals(st, "MintB", None, None)["pf_flagged"] == 1.0
