@@ -9,7 +9,6 @@ Full research report (verdicts, sources, math): https://claude.ai/code/artifact/
 - Order of work is fixed: backtest -> paper trade -> live. Do not write or run code that sends a real transaction until the owner says so in chat.
 - Never handle secrets. No private keys, seed phrases or API keys in chat, in code, in commits or in logs. Keys live in a git-ignored `.env` on a machine the owner controls, and the owner types them in. If a task seems to need a key pasted into the session, stop and say so.
 - You do not place trades. The owner runs the bot. Claude writes, tests and explains it.
-- No site automation. Do not script the Terminal (trade.padre.gg) or pump.fun websites, and do not work around bot detection. Use on-chain data, the official SDK and documented APIs.
 - $0 by default. Prefer free data and free tiers. Before adding anything that costs money, state the price and ask.
 - No trade advice. Report what the data shows. Do not tell the owner which coins to buy. Say plainly when a result is weak or the sample is small.
 - Evidence before claims. Every number in a report comes from code in this repo that someone can rerun. No hand arithmetic in conclusions.
