@@ -1,0 +1,16 @@
+# Secrets never enter git.
+.env
+.env.*
+
+# Raw data stays local; each dataset is described in data/README.md.
+data/*
+!data/README.md
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Login sessions (Telegram) are credentials.
+*.session

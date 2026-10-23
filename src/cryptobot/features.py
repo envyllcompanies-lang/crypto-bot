@@ -1,0 +1,284 @@
+"""Per-token live state and V1 features, built from create and trade events alone (M6).
+
+Every feature here comes from CreateEvent and TradeEvent fields (see events.py), so it
+is computed the same way live and on recorded data. Only tokens whose create event we
+saw are tracked: for older tokens we would not know the age or the early holders.
+
+Not computed here, because they need extra RPC calls or token metadata: holders' SOL
+balances, funding sources, tracked wallets and X links. v1.py records them as not
+evaluated.
+"""
+
+from __future__ import annotations
+
+from collections import Counter, deque
+from dataclasses import dataclass, field
+
+from cryptobot.curve import INITIAL_VIRTUAL_SOL, TOTAL_SUPPLY, Curve, launch_multiple, to_lamports
+
+# Proxy for Terminal's "pro traders" (a platform label we cannot see): wallets that
+# bought at least this much SOL of the token.
+PRO_MIN_BUY_LAMPORTS = to_lamports(0.5)
+# V1's bundle sign: one launch candle with no sells from $4-5K to $10-14K, about
+# 2.0-3.5x launch. A token that reaches this multiple before its first sell is flagged.
+BUNDLE_CANDLE_MULT = 2.0
+# Wallets whose first buy lands in the create slot or the next one count as insiders
+# (with the creator), the definition loopholetape/pumpfun-launches uses for bundles.
+INSIDER_SLOTS = 1
+# The first buyers after launch: in high-risk tokens they hold far more of the supply
+# (MELT, arXiv 2602.13480: first 10 buyers +17 points). The dev is counted separately.
+EARLY_BUYERS = 10
+# Copycats: a launch reusing a name or symbol seen in this window. Originals graduate
+# about ten times as often as copycats (research report); the window is our choice.
+SHOWN_CHARS = 40  # creator-written names are cut to this in logs
+# Validity measures (reports/2026-10-14-social-sources.md, "Coin validity"):
+BUNDLE_SLOTS = 3  # a bundle is bought in the launch slot or the next few
+BUNDLE_MIN_WALLETS = 3  # ...by at least this many wallets in one slot
+BIG_HOLDER_SHARE = 0.005  # a "big holder" holds at least 0.5% of supply
+COORDINATED_MIN = 3  # big holders selling in the same slot
+COPYCAT_WINDOW_MS = 24 * 60 * 60 * 1000
+COPYCAT_MAX_KEYS = 400_000  # memory bound: about 2 days of launches at today's rate
+
+
+def is_classic(create: dict) -> bool:
+    """SOL-quoted (30 SOL virtual at create) and not in Mayhem mode."""
+    return create["virtual_sol_reserves"] == INITIAL_VIRTUAL_SOL and not create["is_mayhem_mode"]
+
+
+class CopycatWindow:
+    """Names and symbols of launches in the last 24 hours, by arrival time.
+
+    Every launch counts, Mayhem and non-SOL ones included, since a copycat can copy any
+    of them. A run starts with an empty window, so its first day finds fewer copycats.
+    """
+
+    def __init__(self, window_ms: int = COPYCAT_WINDOW_MS, max_keys: int = COPYCAT_MAX_KEYS):
+        self.window_ms, self.max_keys = window_ms, max_keys
+        self.order: deque[tuple[int, str]] = deque()
+        self.counts: Counter[str] = Counter()
+
+    @staticmethod
+    def keys(name: str | None, symbol: str | None) -> list[str]:
+        out = []
+        for prefix, value in (("n:", name), ("s:", symbol)):
+            value = (value or "").strip().lower()
+            if value:
+                out.append(prefix + value)
+        return out
+
+    def seen(self, name: str | None, symbol: str | None, ts_ms: int) -> bool:
+        """True if this name or symbol was used in the window; then remember both."""
+        while self.order and (
+            self.order[0][0] < ts_ms - self.window_ms or len(self.order) > self.max_keys
+        ):
+            _, old = self.order.popleft()
+            self.counts[old] -= 1
+            if not self.counts[old]:
+                del self.counts[old]
+        keys = self.keys(name, symbol)
+        copied = any(k in self.counts for k in keys)
+        for k in keys:
+            self.order.append((ts_ms, k))
+            self.counts[k] += 1
+        return copied
+
+
+@dataclass
+class TokenState:
+    mint: str
+    creator: str
+    created_ms: int
+    create_slot: int
+    curve: Curve
+    peak_price: float
+    last_ts_ms: int
+    balances: dict[str, int] = field(default_factory=dict)
+    bought: dict[str, int] = field(default_factory=dict)
+    insiders: set[str] = field(default_factory=set)
+    pro_traders: int = 0
+    n_trades: int = 0
+    n_sells: int = 0
+    launch_run_mult: float = 1.0  # highest multiple reached before the first sell
+    tainted: str | None = None  # "missed_trade" or "gap": state may be wrong from here on
+    uri: str = ""  # metadata link the creator set; text written by the creator, untrusted
+    name: str = ""  # creator-written, untrusted: shown in reports and judged, never acted on
+    symbol: str = ""
+    copycat: bool = False  # name or symbol reused from a launch in the previous 24 hours
+    early_buyers: list[str] = field(default_factory=list)  # first EARLY_BUYERS buyers, not dev
+    # The creator's record from the nightly creator file (tracked.py) and launches seen
+    # live: None = not known (no file loaded yet).
+    creator_graduates: int | None = None  # earlier launches of this creator that graduated
+    creator_recent_launch: bool | None = None  # another launch by them in the 7 days before
+    # Validity measures from the trade stream (logged, not traded on; see snapshot()).
+    volume_lamports: int = 0
+    wash_lamports: int = 0  # buys and sells by one wallet within one slot
+    last_buy_slot: dict[str, int] = field(default_factory=dict)
+    insider_bought_tokens: int = 0
+    slot_buys: dict[int, dict[str, int]] = field(default_factory=dict)  # early slots only
+    bundle_share: float = 0.0  # most supply bought in one slot by BUNDLE_MIN_WALLETS+
+    sell_slots: dict[int, set[str]] = field(default_factory=dict)  # big sellers by slot
+    coordinated_sells: int = 0  # slots where COORDINATED_MIN big holders sold together
+
+    @classmethod
+    def from_create(cls, row: dict) -> TokenState:
+        curve = Curve(row["virtual_sol_reserves"], row["virtual_token_reserves"])
+        return cls(
+            mint=row["mint"],
+            creator=row["creator"],
+            created_ms=row["received_ms"],
+            create_slot=row["slot"],
+            curve=curve,
+            peak_price=curve.price(),
+            last_ts_ms=row["received_ms"],
+            uri=row.get("uri") or "",
+            name=row.get("name") or "",
+            symbol=row.get("symbol") or "",
+        )
+
+    def apply_trade(self, row: dict) -> None:
+        """Advance to the curve this trade left and update holders.
+
+        The event carries reserves after the trade. If the reserves before it (after
+        minus the trade's amounts) don't match the last known state, a trade was
+        missed and the token is marked tainted.
+        """
+        sol, tokens, is_buy = row["sol_amount"], row["token_amount"], row["is_buy"]
+        vsol, vtok = row["virtual_sol_reserves"], row["virtual_token_reserves"]
+        before = (vsol - sol, vtok + tokens) if is_buy else (vsol + sol, vtok - tokens)
+        if before != (self.curve.virtual_sol, self.curve.virtual_tokens) and not self.tainted:
+            self.tainted = "missed_trade"
+        self.curve = Curve(vsol, vtok)
+        self.peak_price = max(self.peak_price, self.curve.price())
+        self.last_ts_ms = row["received_ms"]
+        self.n_trades += 1
+        user = row["user"]
+        slot = row["slot"]
+        self.volume_lamports += sol
+        if is_buy:
+            self.last_buy_slot[user] = slot
+            if slot <= self.create_slot + BUNDLE_SLOTS and user != self.creator:
+                buys = self.slot_buys.setdefault(slot, {})
+                buys[user] = buys.get(user, 0) + tokens
+                if len(buys) >= BUNDLE_MIN_WALLETS:
+                    share = sum(buys.values()) / TOTAL_SUPPLY
+                    self.bundle_share = max(self.bundle_share, share)
+        else:
+            if self.last_buy_slot.get(user) == slot:
+                self.wash_lamports += 2 * sol  # the round trip counts on both sides
+            if self.balances.get(user, 0) >= BIG_HOLDER_SHARE * TOTAL_SUPPLY:
+                sellers = self.sell_slots.setdefault(slot, set())
+                sellers.add(user)
+                if len(sellers) == COORDINATED_MIN:
+                    self.coordinated_sells += 1
+                if len(self.sell_slots) > 50:  # keep only recent slots
+                    for old in sorted(self.sell_slots)[:-20]:
+                        del self.sell_slots[old]
+        if is_buy:
+            self.balances[user] = self.balances.get(user, 0) + tokens
+            was = self.bought.get(user, 0)
+            self.bought[user] = was + sol
+            if was < PRO_MIN_BUY_LAMPORTS <= was + sol:
+                self.pro_traders += 1
+            if user != self.creator and row["slot"] <= self.create_slot + INSIDER_SLOTS:
+                self.insiders.add(user)
+                self.insider_bought_tokens += tokens
+            if (
+                user != self.creator
+                and len(self.early_buyers) < EARLY_BUYERS
+                and user not in self.early_buyers
+            ):
+                self.early_buyers.append(user)
+            if self.n_sells == 0:
+                self.launch_run_mult = max(self.launch_run_mult, self.mcap_multiple)
+        else:
+            self.balances[user] = max(self.balances.get(user, 0) - tokens, 0)
+            self.n_sells += 1
+
+    def age_ms(self, now_ms: int) -> int:
+        return now_ms - self.created_ms
+
+    @property
+    def mcap_multiple(self) -> float:
+        return launch_multiple(self.curve)
+
+    @property
+    def dev_share(self) -> float:
+        return self.balances.get(self.creator, 0) / TOTAL_SUPPLY
+
+    @property
+    def insider_share(self) -> float:
+        held = sum(self.balances.get(w, 0) for w in self.insiders)
+        return self.dev_share + held / TOTAL_SUPPLY
+
+    @property
+    def bundle_candle(self) -> bool:
+        return self.launch_run_mult >= BUNDLE_CANDLE_MULT
+
+    def top_holders(self, n: int) -> list[str]:
+        """The n wallets holding the most tokens, largest first."""
+        held = [w for w, b in self.balances.items() if b > 0]
+        return sorted(held, key=lambda w: (-self.balances[w], w))[:n]
+
+    @property
+    def early_buyer_share(self) -> float:
+        """Share of supply the first EARLY_BUYERS buyers (dev excluded) still hold."""
+        return sum(self.balances.get(w, 0) for w in self.early_buyers) / TOTAL_SUPPLY
+
+    @property
+    def trades_per_progress_pct(self) -> float:
+        """Trades taken per percentage point of curve progress: fewer means fewer, larger
+        buys moved it (graduates take fewer trades to reach a level, arXiv 2602.14860)."""
+        return self.n_trades / max(self.curve.progress * 100, 1.0)
+
+    @property
+    def wash_share(self) -> float:
+        """Share of SOL volume from wallets that bought and sold in the same slot."""
+        return self.wash_lamports / self.volume_lamports if self.volume_lamports else 0.0
+
+    @property
+    def insider_sold_share(self) -> float:
+        """How much of what launch-slot insiders bought they no longer hold."""
+        if not self.insider_bought_tokens:
+            return 0.0
+        held = sum(self.balances.get(w, 0) for w in self.insiders)
+        return max(0.0, 1 - held / self.insider_bought_tokens)
+
+    def tracked_holders(self, tracked: frozenset[str]) -> int:
+        """How many wallets on the tracked list hold this token now."""
+        return sum(1 for w, b in self.balances.items() if b > 0 and w in tracked)
+
+    def largest_holder(self) -> tuple[str | None, float]:
+        """Wallet holding the most tokens (the curve itself is not a wallet here)."""
+        if not self.balances:
+            return None, 0.0
+        wallet = max(self.balances, key=self.balances.__getitem__)
+        return wallet, self.balances[wallet] / TOTAL_SUPPLY
+
+    def snapshot(self, now_ms: int) -> dict:
+        """Feature values for the decision log."""
+        _, holder_share = self.largest_holder()
+        return {
+            "name": self.name[:SHOWN_CHARS],
+            "symbol": self.symbol[:SHOWN_CHARS],
+            "age_s": round(self.age_ms(now_ms) / 1000, 3),
+            "mcap_multiple": round(self.mcap_multiple, 4),
+            "progress": round(self.curve.progress, 4),
+            "dev_share": round(self.dev_share, 4),
+            "insider_share": round(self.insider_share, 4),
+            "insiders": len(self.insiders),
+            "pro_traders": self.pro_traders,
+            "largest_holder_share": round(holder_share, 4),
+            "launch_run_mult": round(self.launch_run_mult, 4),
+            "trades": self.n_trades,
+            "sells": self.n_sells,
+            "tainted": self.tainted,
+            "copycat": self.copycat,
+            "early_buyer_share": round(self.early_buyer_share, 4),
+            "trades_per_progress_pct": round(self.trades_per_progress_pct, 2),
+            "creator_graduates": self.creator_graduates,
+            "creator_recent_launch": self.creator_recent_launch,
+            "wash_share": round(self.wash_share, 4),
+            "bundle_share": round(self.bundle_share, 4),
+            "insider_sold_share": round(self.insider_sold_share, 4),
+            "coordinated_sells": self.coordinated_sells,
+        }

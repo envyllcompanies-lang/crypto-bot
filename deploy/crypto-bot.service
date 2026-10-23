@@ -1,0 +1,23 @@
+[Unit]
+Description=crypto-bot paper trader (simulated fills; never sends a transaction)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=@USER@
+WorkingDirectory=@DIR@
+EnvironmentFile=-@DIR@/.env
+# SIGINT lets the trader finish cleanly: orders in flight land, open positions are
+# valued and the run's summary is written. A restart starts a new run.
+ExecStart=@DIR@/.venv/bin/python -m cryptobot.paper live
+KillSignal=SIGINT
+TimeoutStopSec=60
+Restart=always
+RestartSec=15
+# The machine has 1 GB. Cap the trader so that if it ever grows too big, only it is
+# stopped and restarted (a new run) instead of the whole server freezing, SSH included.
+MemoryHigh=550M
+MemoryMax=650M
+
+[Install]
+WantedBy=multi-user.target
