@@ -1,0 +1,22 @@
+[Unit]
+Description=crypto-bot X reader (the owner's own X account, read-only, slow; xscrape.py)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=@USER@
+WorkingDirectory=@DIR@
+# X_SCRAPE_PER_DAY and X_SCRAPE_GAP_S may be set in the owner's .env. The X session
+# itself is in data/derived/x_accounts.db (git-ignored), saved by `xscrape login`.
+EnvironmentFile=-@DIR@/.env
+# Belt and braces: twscrape's usage telemetry off, plain httpx (no browser impersonation).
+Environment=TWS_TELEMETRY=0 DO_NOT_TRACK=1 TWS_HTTP_BACKEND=httpx
+ExecStart=@DIR@/.venv/bin/python -m cryptobot.xscrape run
+Restart=always
+RestartSec=60
+# About 60 MB when running; capped so it can never crowd out the paper trader.
+MemoryHigh=120M
+MemoryMax=160M
+
+[Install]
+WantedBy=multi-user.target

@@ -1,8 +1,7 @@
 """Live social and attention signals, from free official sources, for the paper trader.
 
 The owner's view is that attention is the whole game, and V3 says the same. X and
-TikTok have no free API, so this collects what can be had for $0 without scraping a
-website:
+TikTok have no free API, so this collects what can be had for $0:
 
 - **DexScreener** token boosts and profiles (`api.dexscreener.com`, free, no key, about
   60 requests a minute). A boost or a profile is paid promotion, so it is attention
@@ -44,9 +43,13 @@ website:
   minutes): `pf_live` is a coin's peak viewer count while streaming, `pf_flagged` marks
   a stream pump.fun's own security verdict didn't "allow".
 
-X and TikTok are not scraped yet: every working method needs a logged-in account or
-defeats their anti-bot measures. Pump.fun comments are left out: the old public
-endpoint is gone and the current one is not known.
+- **X through the owner's own account** (xscrape.py, its own service, off until the
+  owner signs in on the server): for each watched coin, posts naming its contract
+  address or $TICKER, how many accounts posted, their reach and how new they are, and
+  the coin's own X community, post or profile. Read here from data/derived/x_scrape.jsonl.
+
+TikTok is not read: it needs a full browser, too big for the 1 GB server. Pump.fun
+comments are left out: the old public endpoint is gone and the current one is not known.
 
 `run` polls the sources, saves every snapshot under data/live/social/<source>/<date>/,
 and keeps a compact current state in data/derived/social_now.json. The paper trader
@@ -72,14 +75,13 @@ from pathlib import Path
 
 import polars as pl
 
-from cryptobot import freesocial, reddit, telegram_feed, tgweb, xapi
+from cryptobot import freesocial, reddit, telegram_feed, tgweb, xapi, xscrape
 from cryptobot.attention import MIN_KEY_CHARS, keys, norm, wiki_top
 from cryptobot.recorder import LIVE
+from cryptobot.watch import WATCH_PATH, Watchlist  # noqa: F401 (re-exported)
 
 SOCIAL = LIVE / "social"
 NOW_PATH = LIVE.parent / "derived" / "social_now.json"
-# Coins the paper trader wants a closer look at (one JSON line each; paper.Engine).
-WATCH_PATH = LIVE.parent / "derived" / "watch.jsonl"
 X_BUDGET_PATH = LIVE.parent / "derived" / "x_budget.json"
 REDDIT_NEW_EVERY_S = 120
 REDDIT_POPULAR_EVERY_S = 600
@@ -135,6 +137,7 @@ MINT_SOURCES = (  # kinds whose key is a mint address (the rest are keywords)
     "yt_videos_24h",
     "pf_live",
     "pf_flagged",
+    *xscrape.KINDS,
 )
 MASTODON_EVERY_S = 900
 YT_POPULAR_EVERY_S = 1800
@@ -314,36 +317,6 @@ def count_texts(
     return rows, word_posts
 
 
-class Watchlist:
-    """New lines of the paper trader's watch file, read from where it last stopped."""
-
-    def __init__(self, path: Path = WATCH_PATH) -> None:
-        self.path = path
-        self.offset = path.stat().st_size if path.exists() else 0  # only new coins
-        self.done: set[str] = set()
-
-    def new(self) -> list[dict]:
-        if not self.path.exists():
-            return []
-        size = self.path.stat().st_size
-        if size < self.offset:  # the file was rotated
-            self.offset = 0
-        with self.path.open() as f:
-            f.seek(self.offset)
-            lines = f.readlines()
-            self.offset = f.tell()
-        out = []
-        for line in lines:
-            try:
-                item = json.loads(line)
-            except ValueError:
-                continue
-            if item.get("mint") and item["mint"] not in self.done:
-                self.done.add(item["mint"])
-                out.append(item)
-        return out
-
-
 class StreamCounter:
     """Counts mint addresses and $TICKERs in a stream of posts (Bluesky, Telegram) over
     the last hour, keeping only the matches, so memory stays small."""
@@ -498,6 +471,18 @@ PARSERS = {
 }
 
 
+def x_values(item: dict) -> dict[str, float]:
+    """The numbers in one xscrape result line, known kinds only."""
+    values = item.get("values")
+    if not isinstance(values, dict):
+        return {}
+    return {
+        k: float(v)
+        for k, v in values.items()
+        if k in xscrape.KINDS and isinstance(v, int | float) and not isinstance(v, bool)
+    }
+
+
 def run(path: Path = NOW_PATH) -> None:
     """Poll every source on its own schedule until stopped; a failed poll is retried.
 
@@ -550,6 +535,7 @@ def run(path: Path = NOW_PATH) -> None:
         every["farcaster"] = FARCASTER_EVERY_S
     due = {name: 0.0 for name in every}
     watch = Watchlist()
+    x_results = Watchlist(xscrape.RESULTS_PATH)  # written by crypto-bot-x (xscrape.py)
     queues: dict[str, list[dict]] = {"gdelt": [], "youtube": [], "tgweb": [], "dex": []}
     on = {
         "reddit": "api" if red is not None else "rss (no keys)",
@@ -558,6 +544,7 @@ def run(path: Path = NOW_PATH) -> None:
         "telegram": telegram_feed.configured(),
         "telegram web channels": f"{len(tw_channels)} listed",
         "x": x is not None,
+        "x account (xscrape)": xscrape.configured(),
     }
     print("social sources with keys: " + ", ".join(
         f"{k} {v if isinstance(v, str) else ('on' if v else 'off')}" for k, v in on.items()
@@ -650,6 +637,8 @@ def run(path: Path = NOW_PATH) -> None:
                     print(f"x: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
                     got = None
                 coin("x", item, got)
+        for item in x_results.new():  # X read through the owner's account, one line per coin
+            coin("xscrape", item, x_values(item))
         if queues["dex"]:  # free, ~300 a minute: one per loop is far under the limit
             item = queues["dex"].pop(0)
             try:
@@ -824,12 +813,51 @@ def report(root: Path) -> str:
                 f"| {k} | {label} | {r.len():,} | {_pct(r.mean())} "
                 f"[{_pct(r.mean() - half)} to {_pct(r.mean() + half)}] |"
             )
+    lines += [
+        "",
+        "## Per-coin numbers, among trades where they were looked up",
+        "",
+        "Split points fixed before any outcome was seen (COUNT_CUTS in social.py).",
+        "",
+        "| Number | Group | Trades | Mean [95% CI] |",
+        "|---|---|---|---|",
+    ]
+    for k, cut in COUNT_CUTS.items():
+        v = pl.col("social").str.json_path_match(f"$.{k}").cast(pl.Float64)
+        for label, cond in ((f"> {cut}", v > cut), (f"<= {cut}", v <= cut)):
+            r = j.filter(cond)["net_return"]
+            if r.len() == 0:
+                continue
+            half = Z95 * (r.std() or 0) / r.len() ** 0.5
+            lines.append(
+                f"| {k} | {label} | {r.len():,} | {_pct(r.mean())} "
+                f"[{_pct(r.mean() - half)} to {_pct(r.mean() + half)}] |"
+            )
     return "\n".join([*lines, ""])
 
 
 # Validity measures from features.TokenState and the split point the report uses.
 VALIDITY = {"wash_share": 0.1, "bundle_share": 0.05, "insider_sold_share": 0.8,
             "coordinated_sells": 0}  # fmt: skip
+# Per-coin lookups (numbers, not yes/no) and the split point the report uses for each.
+COUNT_CUTS = {
+    "x_ca_posts_1h": 0,  # anyone posted the contract address in the last hour
+    "x_ca_authors": 2,
+    "x_ca_new_share": 0.5,  # most posters' accounts under 30 days old
+    "x_ca_max_followers": 1000,
+    "x_tk_posts_1h": 0,
+    "x_comm_members": 50,
+    "x_post_likes": 20,
+    "x_post_author_followers": 1000,
+    "x_prof_followers": 1000,
+    "x_prof_days": 30,
+    "pf_live": 10,  # peak live viewers
+    "tg_members": 100,
+    "tg_posts_1h": 0,
+    "dex_socials": 0,
+    "gdelt_vol_24h": 0,
+    "yt_videos_24h": 0,
+}
 
 
 def main(argv: list[str] | None = None) -> None:

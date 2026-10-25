@@ -10,6 +10,7 @@ dependencies = [
     "polars==1.17.1",
     "pyarrow==18.1.0",
     "websockets==17.1",
+    "twscrape==0.20.1",
 ]
 
 [dependency-groups]

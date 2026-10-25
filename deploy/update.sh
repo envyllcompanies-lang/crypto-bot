@@ -21,7 +21,7 @@ echo "updating ${OLD:0:7} -> ${NEW:0:7}"
 git merge -q --ff-only "origin/$BRANCH"
 if "$UV" sync --frozen && "$UV" run --frozen pytest -q; then
   bash deploy/install-units.sh
-  sudo systemctl restart crypto-bot.service crypto-bot-social.service
+  sudo systemctl restart crypto-bot.service crypto-bot-social.service crypto-bot-x.service
   echo "updated to ${NEW:0:7} and restarted the paper trader"
 else
   echo "tests failed on ${NEW:0:7}; staying on ${OLD:0:7}"

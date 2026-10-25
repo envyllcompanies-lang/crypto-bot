@@ -95,7 +95,9 @@ Hugging Face search, so it is either private or deleted. Slinky21 replaces it.
   front page (30 min); Mastodon trends (15 min) and GDELT news volume for
   watched coins, Reddit's public RSS feeds and Lemmy (no keys); pump.fun's public list of
   coins streaming live, with viewer counts and its security verdict (5 min, from 19 Oct
-  2026); and, once the owner adds
+  2026); X searches and the coin's own X link, read through the owner's X account by
+  `xscrape.py` (crypto-bot-x service, from the owner's login on; results in
+  `data/derived/x_scrape.jsonl`); and, once the owner adds
   keys, the Reddit API, YouTube, Farcaster,
   Telegram channels and paid X counts. Sources and why others were left out:
   `reports/2026-10-14-social-sources.md`.

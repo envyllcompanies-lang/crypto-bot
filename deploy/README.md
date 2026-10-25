@@ -103,7 +103,8 @@ Setup:
 ## Optional: Reddit, YouTube, Farcaster, Telegram and X for the social collector
 
 Each is off until you add keys to `.env` on the server (`nano ~/crypto-bot/.env`), then
-run `sudo systemctl restart crypto-bot-social`. Never paste keys into chat.
+run `sudo systemctl restart crypto-bot-social`. Never paste keys into chat. Reading X
+through your own account needs no key, only a one-time login (below).
 
 **Reddit (free, non-commercial).** Without keys the bot already reads Reddit's public RSS
 feeds; app keys give it the official API with higher limits.
@@ -183,7 +184,41 @@ posts.
 Mastodon and GDELT (world news coverage of each watched coin's name) need no keys and
 are always on.
 
-**X (paid).**
+**X through your own account (free; read the risk first).**
+
+The bot reads X as your account would in a browser: searches for each watched coin's
+contract address and $TICKER, and the coin's own X community, post or profile. It only
+reads, slowly (one request every 20 seconds, at most 300 a day). Reading X this way
+breaks X's terms, and X can lock or suspend the account, so use a spare account, not
+your main one. If X stops the account, the bot stops reading and logs why.
+
+1. In a browser, sign in to the X account you want the bot to use.
+2. Open x.com, press F12, go to **Application** (Chrome) or **Storage** (Firefox) >
+   **Cookies** > `https://x.com`, and find two values: `auth_token` and `ct0`. They work
+   like a password: don't paste them into chat or anywhere else.
+3. On the server, run the login and type them in when asked (the input is hidden):
+
+   ```
+   cd ~/crypto-bot && .venv/bin/python -m cryptobot.xscrape login
+   ```
+
+   It checks them with one request and prints the account's follower count. The session
+   is saved in `data/derived/x_accounts.db` (git-ignored, readable only by you).
+4. Don't click "Log out" on X in that browser, or the saved session stops working. Close
+   the tab instead.
+
+The X service starts reading within 10 minutes. To check on it:
+
+```
+.venv/bin/python -m cryptobot.xscrape status                # account active? requests today
+sudo journalctl -u crypto-bot-x -n 20 --no-pager
+```
+
+If X logs the account out, run the login again with fresh cookies. To stop reading X
+entirely: `.venv/bin/python -m cryptobot.xscrape logout`. Optional limits in `.env`:
+`X_SCRAPE_PER_DAY=300` and `X_SCRAPE_GAP_S=20`.
+
+**X (paid, official API).**
 
 X has no free API tier for new developers. As of Oct 2026, guides put it at about
 $0.005 per counts request (X's own pricing page wasn't readable from here). The bot
