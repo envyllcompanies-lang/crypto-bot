@@ -210,9 +210,15 @@ your main one. If X stops the account, the bot stops reading and logs why.
 The X service starts reading within 10 minutes. To check on it:
 
 ```
-.venv/bin/python -m cryptobot.xscrape status                # account active? requests today
+.venv/bin/python -m cryptobot.xscrape status                # account, requests today, state
 sudo journalctl -u crypto-bot-x -n 20 --no-pager
+systemctl show -p MemoryPeak crypto-bot-x                    # should stay well under 160M
 ```
+
+`status` says "probably logged out" when X keeps refusing the session (log in again),
+and "searches failing" when X answers searches with errors or block pages, which can
+happen from a cloud server; it then pauses for 30 minutes at a time and records nothing,
+so a block never shows up as "no posts".
 
 If X logs the account out, run the login again with fresh cookies. To stop reading X
 entirely: `.venv/bin/python -m cryptobot.xscrape logout`. Optional limits in `.env`:

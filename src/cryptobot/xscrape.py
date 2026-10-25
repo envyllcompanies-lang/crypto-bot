@@ -49,7 +49,6 @@ import os
 import re
 import sys
 import time
-from contextlib import aclosing
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -66,6 +65,7 @@ DERIVED = LIVE.parent / "derived"
 ACCOUNTS_DB = DERIVED / "x_accounts.db"
 RESULTS_PATH = DERIVED / "x_scrape.jsonl"
 CAP_PATH = DERIVED / "x_scrape_cap.json"
+STATUS_PATH = DERIVED / "x_scrape_status.json"
 PER_DAY = 300
 GAP_S = 20.0
 SEARCH_PAGE = 20  # one page of the Latest tab: one request
@@ -75,6 +75,9 @@ RATE_LIMIT_PAUSE_S = 900  # the account is rate-limited: try again in 15 minutes
 ERROR_PAUSE_S = 60
 DEAD_CHECK_S = 600  # account locked or logged out: check every 10 minutes for a new login
 QUEUE_MAX = 200
+REFUSALS_LOGGED_OUT = 3  # 15-minute refusals in a row: the session has expired
+SEARCH_FAILS_BLOCKED = 5  # failed searches in a row: X is probably blocking us
+BLOCKED_PAUSE_S = 1800
 
 KINDS = (
     "x_ca_posts",
@@ -103,7 +106,8 @@ HANDLE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 NOT_PROFILES = {"i", "home", "search", "explore", "hashtag", "intent", "share", "messages"}
 
 
-def configured(db: Path = ACCOUNTS_DB) -> bool:
+def configured(db: Path | None = None) -> bool:
+    db = db or ACCOUNTS_DB
     return db.exists() and db.stat().st_size > 0
 
 
@@ -201,11 +205,22 @@ def profile_metrics(u, now: datetime) -> dict[str, float]:
     return out
 
 
+def _has_key(obj: object, key: str, depth: int = 8) -> bool:
+    """Whether a timeline answer carries `key` somewhere (X nests it a few levels down)."""
+    if depth < 0:
+        return False
+    if isinstance(obj, dict):
+        return key in obj or any(_has_key(v, key, depth - 1) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_has_key(v, key, depth - 1) for v in obj)
+    return False
+
+
 class DailyCap:
     """Requests made today (UTC), kept on disk so restarts don't reset it."""
 
-    def __init__(self, path: Path = CAP_PATH, per_day: int = PER_DAY) -> None:
-        self.path, self.per_day = path, per_day
+    def __init__(self, path: Path | None = None, per_day: int = PER_DAY) -> None:
+        self.path, self.per_day = path or CAP_PATH, per_day
 
     def _load(self) -> dict:
         day = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -224,7 +239,9 @@ class DailyCap:
             return False
         data["requests"] += 1
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(data))
+        tmp = self.path.with_suffix(".tmp")  # a kill mid-write must not reset the count
+        tmp.write_text(json.dumps(data))
+        tmp.replace(self.path)
         return True
 
 
@@ -236,13 +253,19 @@ class AccountDead(Exception):
 
 
 class RateLimited(Exception):
-    pass
+    """No account free right now: X rate-limited it, or (twscrape can't tell the two
+    apart) X served the logged-out web app, i.e. the session has expired."""
+
+
+class SearchFailed(Exception):
+    """The search didn't come back as a search result (blocked, error, changed format).
+    Never recorded as "no posts": the coin is skipped instead."""
 
 
 class XScraper:
     def __init__(
         self,
-        db: Path = ACCOUNTS_DB,
+        db: Path | None = None,
         cap: DailyCap | None = None,
         gap_s: float | None = None,
         api=None,
@@ -255,7 +278,7 @@ class XScraper:
             from twscrape import API, set_log_level
 
             set_log_level("WARNING")
-            api = API(str(db), raise_when_no_account=True)
+            api = API(str(db or ACCOUNTS_DB), raise_when_no_account=True)
         self.api = api
 
     def _run(self, coro):
@@ -288,15 +311,35 @@ class XScraper:
         info = self._run(self.api.pool.accounts_info())
         if not info:
             return "no account"
-        return info[0].get("error_msg") or "inactive"
+        msg = info[0].get("error_msg")
+        return msg if msg and msg != "None" else "inactive"
 
     async def _search_page(self, q: str) -> list:
+        """One request to X's search (Latest tab), as twscrape's search makes it, but
+        never followed by more pages: twscrape's own search quietly asks again after an
+        empty page and yields nothing when a request fails, which would read as zero."""
+        from twscrape.api import GQL_FEATURES, GQL_URL, OP_SearchTimeline
         from twscrape.models import parse_tweets
+        from twscrape.queue_client import QueueClient
+        from twscrape.utils import encode_params
 
-        async with aclosing(self.api.search_raw(q, limit=SEARCH_PAGE)) as gen:
-            async for rep in gen:  # the first page only: exactly one request
-                return list(parse_tweets(rep.json(), SEARCH_PAGE))
-        return []
+        variables = {"rawQuery": q, "count": SEARCH_PAGE, "product": "Latest",
+                     "querySource": "typed_query"}  # fmt: skip
+        params = {"variables": variables, "features": GQL_FEATURES,
+                  "fieldToggles": {"withArticleRichContentState": False}}  # fmt: skip
+        async with QueueClient(self.api.pool, "SearchTimeline") as client:
+            rep = await client.get(f"{GQL_URL}/{OP_SearchTimeline}", params=encode_params(params))
+        if rep is None:
+            raise SearchFailed("no answer (blocked or aborted)")
+        try:
+            obj = rep.json()
+        except ValueError:
+            raise SearchFailed("not JSON") from None
+        if not isinstance(obj, dict) or not _has_key(obj.get("data"), "instructions"):
+            errors = obj.get("errors") if isinstance(obj, dict) else None
+            msgs = [str(e.get("message")) for e in errors or [] if isinstance(e, dict)]
+            raise SearchFailed("; ".join(msgs) or "no timeline in the answer")
+        return list(parse_tweets(obj, SEARCH_PAGE))
 
     def search(self, q: str) -> list | None:
         return self._call(lambda: self._search_page(q))
@@ -341,7 +384,8 @@ def x_link_of(uri: str | None) -> str | None:
     return link if isinstance(link, str) else None
 
 
-def write_result(item: dict, values: dict[str, float], path: Path = RESULTS_PATH) -> None:
+def write_result(item: dict, values: dict[str, float], path: Path | None = None) -> None:
+    path = path or RESULTS_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     line = {"mint": item["mint"], "ts_ms": int(time.time() * 1000), "values": values}
     with path.open("a") as f:
@@ -351,48 +395,111 @@ def write_result(item: dict, values: dict[str, float], path: Path = RESULTS_PATH
 # Service and commands ---------------------------------------------------------------
 
 
+def set_status(state: str, detail: str = "", path: Path | None = None) -> None:
+    """What the X service is doing now, for `xscrape status` and the owner."""
+    path = path or STATUS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"state": state, "detail": detail, "ts_ms": int(time.time() * 1000)}))
+    tmp.replace(path)
+
+
+def _say(msg: str, state: str, err: bool = False) -> None:
+    print(f"x scrape: {msg}", file=sys.stderr if err else sys.stdout, flush=True)
+    set_status(state, msg)
+
+
+LOGIN_AGAIN = "run `python -m cryptobot.xscrape login` again with fresh cookies"
+
+
+class Service:
+    """The X service, one step at a time: `step()` handles at most one coin and returns
+    how long to sleep before the next step."""
+
+    def __init__(self, watch, make_scraper=None, link_of=None, results: Path | None = None):
+        self.watch = watch
+        self.make_scraper = make_scraper or XScraper
+        self.link_of = link_of or x_link_of
+        self.results = results
+        self.x: XScraper | None = None
+        self.queue: list[dict] = []
+        self.paused_until = 0.0
+        self.refusals = self.fails = 0  # in a row, with nothing read in between
+        self.waiting = self.dead = False
+
+    def step(self) -> float:
+        self.queue = (self.queue + self.watch.new())[-QUEUE_MAX:]
+        if not configured():  # never signed in, or `xscrape logout`
+            if not self.waiting:
+                _say("no X account saved; run `python -m cryptobot.xscrape login`", "no login")
+            self.waiting, self.dead, self.x = True, False, None
+            return DEAD_CHECK_S
+        if self.x is None:
+            self.x, self.waiting = self.make_scraper(), False
+            _say(f"reading: {self.x.cap.per_day} requests a day, {self.x.gap_s:.0f} s apart",
+                 "reading")  # fmt: skip
+        if self.dead:
+            if not self.x.active():
+                return DEAD_CHECK_S
+            self.dead, self.refusals, self.fails = False, 0, 0
+            _say("account active again; reading", "reading")
+        if not self.queue or time.time() < self.paused_until or self.x.cap.left() == 0:
+            return 5
+        item = self.queue.pop()  # newest first: a stale coin is worth less than a fresh one
+        try:
+            values = self.x.coin(item, self.link_of(item.get("uri")))
+        except RateLimited:
+            self.refusals += 1
+            self.queue.append(item)
+            self.paused_until = time.time() + RATE_LIMIT_PAUSE_S
+            if self.refusals >= REFUSALS_LOGGED_OUT:
+                # twscrape locks an account whose session expired just like a rate-limited
+                # one; three refusals in a row with nothing read means the former.
+                _say(f"X refused the account {self.refusals} times in a row; the session has "
+                     f"probably expired or been logged out: {LOGIN_AGAIN}",
+                     "probably logged out", err=True)  # fmt: skip
+            else:
+                _say("rate-limited by X; pausing 15 minutes", "rate-limited")
+            return 0
+        except AccountDead as e:
+            _say(f"X stopped the account ({e}); reading is off: {LOGIN_AGAIN}", "stopped by X",
+                 err=True)  # fmt: skip
+            self.dead = True
+            return DEAD_CHECK_S
+        except SearchFailed as e:
+            self.fails += 1
+            if self.fails >= SEARCH_FAILS_BLOCKED:
+                _say(f"{self.fails} searches in a row failed ({e}); X may be blocking this "
+                     "server. Pausing 30 minutes", "searches failing", err=True)  # fmt: skip
+                self.paused_until = time.time() + BLOCKED_PAUSE_S
+            else:
+                print(f"x scrape: search failed ({e}); skipping this coin", file=sys.stderr,
+                      flush=True)  # fmt: skip
+                self.paused_until = time.time() + ERROR_PAUSE_S
+            return 0
+        except Exception as e:  # network or format trouble: skip this coin, slow down
+            print(f"x scrape: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            self.paused_until = time.time() + ERROR_PAUSE_S
+            return 0
+        if self.refusals or self.fails:
+            _say("reading again", "reading")
+        self.refusals = self.fails = 0
+        if values:
+            write_result(item, values, self.results)
+        return 0
+
+
 def run() -> None:
     from cryptobot.watch import WATCH_PATH, Watchlist
 
-    if not configured():
-        print("x scrape: no account yet; run `python -m cryptobot.xscrape login`", flush=True)
-    while not configured():
-        time.sleep(DEAD_CHECK_S)
-    x = XScraper()
-    watch = Watchlist(WATCH_PATH)
-    queue: list[dict] = []
-    paused_until = 0.0
-    print(f"x scrape started: {x.cap.per_day} requests a day, {x.gap_s:.0f} s apart", flush=True)
+    service = Service(Watchlist(WATCH_PATH))
     while True:
-        queue = (queue + watch.new())[-QUEUE_MAX:]
-        if not queue or time.time() < paused_until or x.cap.left() == 0:
-            time.sleep(5)
-            continue
-        item = queue.pop()  # newest first: a stale coin is worth less than a fresh one
-        try:
-            values = x.coin(item, x_link_of(item.get("uri")))
-        except RateLimited:
-            print("x scrape: rate-limited by X; pausing 15 minutes", flush=True)
-            queue.append(item)
-            paused_until = time.time() + RATE_LIMIT_PAUSE_S
-            continue
-        except AccountDead as e:
-            print(
-                f"x scrape: X stopped the account ({e}). Reading is off until the owner runs "
-                "`python -m cryptobot.xscrape login` again.",
-                file=sys.stderr,
-                flush=True,
-            )
-            while not x.active():
-                time.sleep(DEAD_CHECK_S)
-            print("x scrape: account active again; resuming", flush=True)
-            continue
-        except Exception as e:  # network or format trouble: skip this coin, slow down
-            print(f"x scrape: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-            paused_until = time.time() + ERROR_PAUSE_S
-            continue
-        if values:
-            write_result(item, values)
+        time.sleep(service.step())
+
+
+def interactive() -> bool:
+    """A real terminal: without one, getpass would echo what is typed."""
+    return sys.stdin.isatty()
 
 
 def _cookie_value(prompt: str) -> str:
@@ -413,13 +520,19 @@ def login() -> None:
         "password: type them here only, never in chat. Don't log out of X in that\n"
         "browser afterwards, or the cookies stop working (close the tab instead).\n"
     )
+    if not interactive():
+        sys.exit("Run this in an interactive terminal (over SSH: `ssh -t`), so the cookies stay "
+                 "hidden as you type them.")  # fmt: skip
     username = input("X username (without @): ").strip().lstrip("@")
     if not HANDLE.match(username):
         sys.exit("That isn't an X username; nothing was saved.")
     auth = _cookie_value("auth_token (hidden): ")
     ct0 = _cookie_value("ct0 (hidden): ")
     ACCOUNTS_DB.parent.mkdir(parents=True, exist_ok=True)
-    old_umask = os.umask(0o077)  # the db file is created readable by its owner only
+    # Readable by its owner only before any cookie is written to it.
+    os.close(os.open(ACCOUNTS_DB, os.O_CREAT | os.O_RDWR, 0o600))
+    os.chmod(ACCOUNTS_DB, 0o600)
+    old_umask = os.umask(0o077)
     try:
         api = API(str(ACCOUNTS_DB), raise_when_no_account=True)
         loop = asyncio.new_event_loop()
@@ -434,9 +547,11 @@ def login() -> None:
     try:
         user = x.lookup(("profile", username))
     except (AccountDead, RateLimited) as e:
-        sys.exit(f"X didn't accept these cookies ({type(e).__name__}: {e}).")
+        ACCOUNTS_DB.unlink(missing_ok=True)  # don't leave the service a session that fails
+        sys.exit(f"X didn't accept these cookies ({type(e).__name__}: {e}); nothing was kept.")
     if user is None:
-        sys.exit("X didn't return the profile; check the username and try again.")
+        ACCOUNTS_DB.unlink(missing_ok=True)
+        sys.exit("X didn't return the profile; check the username and cookies, then try again.")
     print(f"Working: @{user.username}, {user.followersCount:,} followers.")
     print("The X service picks it up within 10 minutes (or: sudo systemctl restart crypto-bot-x).")
 
@@ -447,9 +562,16 @@ def status() -> None:
         return
     x = XScraper(api=_api_only())
     for a in x._run(x.api.pool.accounts_info()):
-        state = "active" if a["active"] else f"stopped ({a['error_msg']})"
+        why = a["error_msg"] if a["error_msg"] not in (None, "", "None") else "no reason given"
+        state = "active" if a["active"] else f"stopped by X ({why})"
         print(f"@{a['username']}: {state}; {a['total_req']} requests in all")
     print(f"today: {x.cap.per_day - x.cap.left()} of {x.cap.per_day} requests used")
+    try:
+        st = json.loads(STATUS_PATH.read_text())
+        when = datetime.fromtimestamp(st["ts_ms"] / 1000, UTC).strftime("%Y-%m-%d %H:%M UTC")
+        print(f"service: {st['state']} (since {when}) {st.get('detail', '')}".rstrip())
+    except (FileNotFoundError, ValueError, KeyError):
+        print("service: no status yet (is crypto-bot-x running?)")
     if RESULTS_PATH.exists():
         with RESULTS_PATH.open() as f:
             print(f"coins looked up (current file): {sum(1 for _ in f)}")

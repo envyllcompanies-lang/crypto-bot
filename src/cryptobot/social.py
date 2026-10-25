@@ -139,6 +139,17 @@ MINT_SOURCES = (  # kinds whose key is a mint address (the rest are keywords)
     "pf_flagged",
     *xscrape.KINDS,
 )
+OWN_ACCOUNT_KINDS = {  # describe the coin's own accounts and listings, not mentions of it
+    "tg_members",
+    "dex_socials",
+    "dex_websites",
+    *(k for k in xscrape.KINDS if k.startswith(("x_comm_", "x_post_", "x_prof_"))),
+    # reach and freshness of those who posted: positive only when there were posts
+    "x_ca_likes",
+    "x_ca_views",
+    "x_ca_max_followers",
+    "x_ca_new_share",
+}
 MASTODON_EVERY_S = 900
 YT_POPULAR_EVERY_S = 1800
 FARCASTER_EVERY_S = 900
@@ -434,8 +445,14 @@ def signals(state: dict | None, mint: str, name: str | None, symbol: str | None)
             for kind, (value, _) in state.get("keywords", {}).get(k, {}).items():
                 out[kind] = min(value, out.get(kind, value))
     # How many separate sources mention the coin (dex, reddit, x...): "talked about in
-    # several places" can then be tested on its own.
-    families = {kind.split("_")[0] for kind in out if kind != "loaded"}
+    # several places" can then be tested on its own. A per-coin lookup that found nothing
+    # (0 posts, 0 videos) is not a mention, and neither are facts about the coin's own
+    # accounts (its Telegram's size, its X profile's followers).
+    families = {
+        kind.split("_")[0]
+        for kind, value in out.items()
+        if kind != "loaded" and kind not in OWN_ACCOUNT_KINDS and value > 0
+    }
     out["any"] = bool(families)
     out["sources"] = len(families)
     return out

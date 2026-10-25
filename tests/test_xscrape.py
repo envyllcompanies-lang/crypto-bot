@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as NS
 
@@ -108,18 +109,46 @@ def test_cap_stops_requests(tmp_path):
     assert x._call(ok) is None  # the day's cap is used up: no request made
 
 
-def test_a_search_reads_only_the_first_page(tmp_path):
-    pages = []
+class FakeQueueClient:
+    """Stands in for twscrape's QueueClient: answers each get() from a list."""
 
-    async def search_raw(q, limit):
-        for i in range(3):
-            pages.append(i)
-            yield NS(json=lambda: {})
+    answers: list = []
+    calls: list = []
 
+    def __init__(self, pool, queue, *a, **kw):
+        assert queue == "SearchTimeline"
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, url, params=None):
+        FakeQueueClient.calls.append(json.loads(params["variables"])["rawQuery"])
+        answer = FakeQueueClient.answers.pop(0)
+        return None if answer is None else NS(json=lambda: answer)
+
+
+EMPTY_TIMELINE = {"data": {"search_by_raw_query": {"search_timeline": {"timeline": {
+    "instructions": [{"type": "TimelineAddEntries", "entries": []}]}}}}}  # fmt: skip
+
+
+def test_a_search_is_one_request_and_a_failure_is_never_zero_posts(tmp_path, monkeypatch):
+    import twscrape.queue_client
+
+    monkeypatch.setattr(twscrape.queue_client, "QueueClient", FakeQueueClient)
+    FakeQueueClient.calls = []
+    FakeQueueClient.answers = [EMPTY_TIMELINE, None, {"errors": [{"message": "Denied"}]}, "x"]
     x = scraper(tmp_path, FakePool(active=True))
-    x.api.search_raw = search_raw
-    assert x.search('"Mint"') == []
-    assert pages == [0]
+    assert x.search('"Mint"') == []  # a real, empty answer: no posts
+    assert FakeQueueClient.calls == ['"Mint"']  # one request, no second page
+    with pytest.raises(xscrape.SearchFailed, match="blocked"):
+        x.search('"Mint"')  # twscrape gave up (Cloudflare page, aborted request)
+    with pytest.raises(xscrape.SearchFailed, match="Denied"):
+        x.search('"Mint"')
+    with pytest.raises(xscrape.SearchFailed):
+        x.search('"Mint"')  # not a timeline at all
 
 
 def test_coin_combines_searches_and_the_link(tmp_path, monkeypatch):
@@ -163,6 +192,7 @@ def test_login_saves_cookies_privately_and_never_prints_them(tmp_path, monkeypat
     db = tmp_path / "x_accounts.db"
     monkeypatch.setattr(xscrape, "ACCOUNTS_DB", db)
     monkeypatch.setattr(xscrape, "CAP_PATH", tmp_path / "cap.json")
+    monkeypatch.setattr(xscrape, "interactive", lambda: True)
     monkeypatch.setattr("builtins.input", lambda prompt: "@my_account")
     secrets = iter(["a1b2c3secretauth", "d4e5f6secretct0"])
     monkeypatch.setattr(xscrape.getpass, "getpass", lambda prompt: next(secrets))
@@ -183,6 +213,7 @@ def test_login_saves_cookies_privately_and_never_prints_them(tmp_path, monkeypat
 
 def test_login_refuses_values_that_are_not_cookies(tmp_path, monkeypatch):
     monkeypatch.setattr(xscrape, "ACCOUNTS_DB", tmp_path / "x.db")
+    monkeypatch.setattr(xscrape, "interactive", lambda: True)
     monkeypatch.setattr("builtins.input", lambda prompt: "me")
     monkeypatch.setattr(xscrape.getpass, "getpass", lambda prompt: "auth_token=abc; ct0=def")
     with pytest.raises(SystemExit):
@@ -193,3 +224,125 @@ def test_login_refuses_values_that_are_not_cookies(tmp_path, monkeypatch):
 def test_telemetry_is_off_and_no_browser_impersonation():
     assert os.environ["TWS_TELEMETRY"] == "0" and os.environ["DO_NOT_TRACK"] == "1"
     assert os.environ["TWS_HTTP_BACKEND"] == "httpx"
+
+
+def test_login_needs_a_terminal_and_keeps_nothing_x_rejects(tmp_path, monkeypatch):
+    db = tmp_path / "x.db"
+    monkeypatch.setattr(xscrape, "ACCOUNTS_DB", db)
+    monkeypatch.setattr(xscrape, "CAP_PATH", tmp_path / "cap.json")
+    monkeypatch.setattr(xscrape, "interactive", lambda: False)
+    with pytest.raises(SystemExit, match="interactive terminal"):
+        xscrape.login()  # getpass would echo the cookies
+    monkeypatch.setattr(xscrape, "interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "me_too")
+    monkeypatch.setattr(xscrape.getpass, "getpass", lambda prompt: "abc123")
+
+    def rejected(self, target):
+        raise xscrape.AccountDead("(32) Could not authenticate you")
+
+    monkeypatch.setattr(xscrape.XScraper, "lookup", rejected)
+    with pytest.raises(SystemExit, match="nothing was kept"):
+        xscrape.login()
+    assert not db.exists()
+
+
+class FakeWatch:
+    def __init__(self, items):
+        self.items = list(items)
+
+    def new(self):
+        out, self.items = self.items, []
+        return out
+
+
+class FakeScraper:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.cap = NS(per_day=300, left=lambda: 300)
+        self.gap_s = 20
+        self.is_active = True
+
+    def coin(self, item, link):
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def active(self):
+        return self.is_active
+
+
+@pytest.fixture
+def service_env(tmp_path, monkeypatch):
+    db = tmp_path / "x_accounts.db"
+    db.write_bytes(b"saved")
+    monkeypatch.setattr(xscrape, "ACCOUNTS_DB", db)
+    monkeypatch.setattr(xscrape, "STATUS_PATH", tmp_path / "status.json")
+    return tmp_path
+
+
+def service(tmp_path, outcomes, coins=10):
+    fake = FakeScraper(outcomes)
+    items = [{"mint": f"M{i}", "uri": None} for i in range(coins)]
+    svc = xscrape.Service(FakeWatch(items), make_scraper=lambda: fake,
+                          link_of=lambda uri: None, results=tmp_path / "x.jsonl")  # fmt: skip
+    return svc, fake
+
+
+def state(tmp_path):
+    return json.loads((tmp_path / "status.json").read_text())["state"]
+
+
+def test_service_tells_rate_limits_from_an_expired_session(service_env):
+    svc, _ = service(service_env, [xscrape.RateLimited()] * 3 + [{"x_ca_posts": 1.0}])
+    for expect in ("rate-limited", "rate-limited", "probably logged out"):
+        svc.step()
+        svc.paused_until = 0  # skip the 15-minute pause
+        assert state(service_env) == expect
+    svc.step()  # a coin is read again
+    assert state(service_env) == "reading" and svc.refusals == 0
+    lines = (service_env / "x.jsonl").read_text().splitlines()
+    assert [json.loads(line)["values"] for line in lines] == [{"x_ca_posts": 1.0}]
+
+
+def test_service_pauses_when_searches_keep_failing_and_writes_no_zeros(service_env):
+    fails = [xscrape.SearchFailed("blocked")] * xscrape.SEARCH_FAILS_BLOCKED
+    svc, _ = service(service_env, fails)
+    for _ in fails:
+        svc.paused_until = 0
+        svc.step()
+    assert state(service_env) == "searches failing"
+    assert svc.paused_until - time.time() > 1000  # a long pause, not a retry a minute
+    assert not (service_env / "x.jsonl").exists()
+
+
+def test_service_waits_for_a_new_login_after_x_stops_the_account(service_env):
+    svc, fake = service(service_env, [xscrape.AccountDead("suspended"), {"x_ca_posts": 2.0}])
+    svc.step()
+    assert state(service_env) == "stopped by X"
+    fake.is_active = False
+    assert svc.step() == xscrape.DEAD_CHECK_S  # still stopped: reads nothing
+    fake.is_active = True  # the owner ran `login` again
+    svc.step()
+    svc.step()
+    assert (service_env / "x.jsonl").exists()
+
+
+def test_service_stops_reading_after_logout(service_env):
+    svc, _ = service(service_env, [{"x_ca_posts": 1.0}])
+    xscrape.ACCOUNTS_DB.unlink()
+    assert svc.step() == xscrape.DEAD_CHECK_S
+    assert state(service_env) == "no login"
+    assert not (service_env / "x.jsonl").exists()
+
+
+def test_lookups_that_found_nothing_are_not_mentions():
+    rows = [("x_ca_posts", "M", 0.0, ""), ("x_ca_posts_1h", "M", 0.0, ""),
+            ("x_prof_followers", "M", 900.0, ""), ("tg_members", "M", 500.0, ""),
+            ("dex_boosts_active", "M", 0.0, "")]  # fmt: skip
+    sig = social.signals(social.update({}, rows, 0), "M", None, None)
+    assert sig["x_ca_posts"] == 0.0 and sig["x_prof_followers"] == 900.0  # still logged
+    assert sig["sources"] == 0 and sig["any"] is False
+    rows.append(("x_ca_posts", "M", 3.0, ""))
+    sig = social.signals(social.update({}, rows, 0), "M", None, None)
+    assert sig["sources"] == 1  # now X mentions it
