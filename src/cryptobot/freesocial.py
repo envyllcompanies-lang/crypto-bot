@@ -20,6 +20,7 @@ need a free key in the server's `.env` and stay off without one:
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -28,7 +29,7 @@ import urllib.parse
 import urllib.request
 from datetime import UTC, datetime, timedelta
 
-from cryptobot.attention import MIN_KEY_CHARS, norm
+from cryptobot.text import MIN_KEY_CHARS, norm
 
 USER_AGENT = (
     "crypto-bot-research/0.1 (private research; github.com/envyllcompanies-lang/crypto-bot)"
@@ -62,8 +63,16 @@ def mastodon_tags(raw: bytes) -> Rows:
     return rows
 
 
+SPAN = re.compile(r"</?span[^>]*>")
+
+
 def mastodon_texts(raw: bytes) -> list[str]:
-    return [TAG.sub(" ", s.get("content") or "") for s in json.loads(raw)]
+    """Post texts. Mastodon splits a long link's text into visible and hidden spans, so
+    spans are dropped without a space (or a mint in a pump.fun link would be cut in two)
+    before the other tags become spaces."""
+    return [
+        html.unescape(TAG.sub(" ", SPAN.sub("", s.get("content") or ""))) for s in json.loads(raw)
+    ]
 
 
 # GDELT -------------------------------------------------------------------------------

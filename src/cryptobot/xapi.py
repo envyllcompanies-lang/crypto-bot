@@ -23,6 +23,7 @@ its watchlist (late-curve and elite candidates; paper.Engine.watch_path).
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import urllib.parse
@@ -30,7 +31,7 @@ import urllib.request
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from cryptobot.attention import norm
+from cryptobot.text import norm
 
 COUNTS = "https://api.x.com/2/tweets/counts/recent"
 
@@ -64,8 +65,12 @@ class Budget:
         month = datetime.now(UTC).strftime("%Y-%m")
         try:
             data = json.loads(self.path.read_text())
-        except (FileNotFoundError, ValueError):
+        except FileNotFoundError:
             data = {}
+        except ValueError:  # unreadable (a crash mid-write): if it was written this
+            # month, assume the month is spent rather than start again from 0
+            written = datetime.fromtimestamp(self.path.stat().st_mtime, UTC).strftime("%Y-%m")
+            data = {"month": month, "requests": math.inf} if written == month else {}
         return data if data.get("month") == month else {"month": month, "requests": 0}
 
     def spent(self) -> float:
@@ -78,7 +83,9 @@ class Budget:
             return False
         data["requests"] += 1
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(data))
+        tmp = self.path.with_suffix(".tmp")  # a crash mid-write must not reset the count
+        tmp.write_text(json.dumps(data))
+        tmp.replace(self.path)
         return True
 
 
@@ -107,10 +114,29 @@ class XCounts:
         return summarize(got)
 
 
-def summarize(got: dict) -> dict:
-    buckets = got.get("data", [])
+def summarize(got: dict, now: datetime | None = None) -> dict | None:
+    """Posts in the last complete hour and over 24 hours; None for an answer without
+    counts (an error object is not "no posts")."""
+    buckets = got.get("data")
+    if not isinstance(buckets, list):
+        return None
+    now = now or datetime.now(UTC)
     total = got.get("meta", {}).get("total_tweet_count")
     if total is None:
         total = sum(b.get("tweet_count", 0) for b in buckets)
-    last = buckets[-1]["tweet_count"] if buckets else 0
+    # X's hourly buckets end on the hour, so the newest one is the unfinished current
+    # hour: use the newest bucket that has ended (or the newest, if no end is given).
+    done = [b for b in buckets if _ended(b, now)]
+    last = (done or buckets)[-1].get("tweet_count", 0) if buckets else 0
     return {"x_posts_1h": float(last), "x_posts_24h": float(total)}
+
+
+def _ended(bucket: dict, now: datetime) -> bool:
+    """A bucket that covers a whole hour and is over (the current one ends "now")."""
+    try:
+        start, end = (
+            datetime.fromisoformat(str(bucket[k]).replace("Z", "+00:00")) for k in ("start", "end")
+        )
+    except (KeyError, ValueError):
+        return False
+    return end <= now and (end - start).total_seconds() >= 3600

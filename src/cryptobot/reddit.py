@@ -27,6 +27,7 @@ import json
 import os
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -52,8 +53,7 @@ class Reddit:
         self.secret = os.environ["REDDIT_CLIENT_SECRET"]
         user = os.environ.get("REDDIT_USERNAME", "unknown")
         self.user_agent = f"linux:crypto-bot-research:0.1 (by /u/{user})"
-        subs = os.environ.get("CRYPTOBOT_REDDIT_SUBS")
-        self.subs = tuple(subs.split(",")) if subs else REDDIT_SUBS
+        self.subs = subreddits()
         self.token: str | None = None
         self.expires = 0.0
 
@@ -77,8 +77,13 @@ class Reddit:
             f"{API}{path}",
             headers={"Authorization": f"bearer {self._auth()}", "User-Agent": self.user_agent},
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.load(resp)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.load(resp)
+        except urllib.error.HTTPError as e:
+            if e.code == 401:  # token revoked early: get a new one on the next call
+                self.token = None
+            raise
 
     def new_posts(self) -> list[str]:
         """Title and text of the newest 100 posts across the memecoin subreddits."""
@@ -133,13 +138,15 @@ def _rss(path: str) -> bytes:
         return resp.read()
 
 
-def rss_new_posts(subs: tuple[str, ...] = REDDIT_SUBS) -> list[str]:
-    subs = (
-        tuple(os.environ["CRYPTOBOT_REDDIT_SUBS"].split(","))
-        if os.environ.get("CRYPTOBOT_REDDIT_SUBS")
-        else subs
-    )
-    return rss_texts(_rss(f"/r/{'+'.join(subs)}/new/.rss?limit=100"))
+def subreddits() -> tuple[str, ...]:
+    """CRYPTOBOT_REDDIT_SUBS (comma separated, spaces and "r/" allowed) or the defaults."""
+    raw = os.environ.get("CRYPTOBOT_REDDIT_SUBS", "")
+    subs = tuple(s.strip().removeprefix("r/") for s in raw.split(",") if s.strip())
+    return subs or REDDIT_SUBS
+
+
+def rss_new_posts() -> list[str]:
+    return rss_texts(_rss(f"/r/{'+'.join(subreddits())}/new/.rss?limit=100"))
 
 
 def rss_popular_titles() -> list[str]:

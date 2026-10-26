@@ -112,8 +112,13 @@ def http_json(url: str, body: dict | None, headers: dict[str, str]) -> dict:
 def _clip(value: object, limit: int = FIELD_MAX_CHARS) -> str | None:
     if not isinstance(value, str):
         return None
-    text = " ".join(value.replace(BEGIN, "").replace(END, "").split())
-    return text[:limit] or None
+    text = value
+    while BEGIN in text or END in text:  # nested markers ("TOKEN_DATTOKEN_DATA>>>A>>>")
+        text = text.replace(BEGIN, "").replace(END, "")  # would survive a single pass
+    text = " ".join(text.split())[:limit]
+    while BEGIN in text or END in text:  # nor may the cut or whitespace rebuild one
+        text = text.replace(BEGIN, "").replace(END, "")
+    return text or None
 
 
 def tweet_text(url: str, http: Http = http_json) -> str | None:

@@ -29,7 +29,6 @@ import argparse
 import json
 import re
 import time
-import unicodedata
 import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
@@ -38,25 +37,17 @@ import polars as pl
 
 from cryptobot.screen import DISCOVERY_END, _classic_creates, _pct, _summary
 from cryptobot.slinky import SLINKY_ROOT, files
+from cryptobot.text import MIN_KEY_CHARS, norm  # noqa: F401 (re-exported)
 
 ATTENTION = SLINKY_ROOT.parent.parent / "derived" / "attention"
 WIKI_TOP = "https://wikimedia.org/api/rest_v1/metrics/pageviews/top/en.wikipedia/all-access/{y}/{m:02d}/{d:02d}"
 USER_AGENT = (
     "crypto-bot-research/0.1 (private research; github.com/envyllcompanies-lang/crypto-bot)"
 )
-MIN_KEY_CHARS = 4
 META = re.compile(
     r"^(Main_Page|Special:|Wikipedia:|Portal:|File:|Help:|Category:|Template:|Talk:|User:)"
     r"|^(Deaths_in|List_of|\d{4}_in_)",
 )
-
-
-def norm(text: str | None) -> str:
-    """Lower case, accents dropped, letters and digits only."""
-    if not text:
-        return ""
-    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
-    return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
 def _fetch(day: date, attempts: int = 8) -> list[dict]:
@@ -76,13 +67,14 @@ def _fetch(day: date, attempts: int = 8) -> list[dict]:
 def wiki_top(day: date, cache: Path = ATTENTION, attempts: int = 8) -> pl.DataFrame:
     """That day's top articles (article, views, rank), meta pages dropped; cached."""
     path = cache / f"wiki_top_{day:%Y-%m-%d}.parquet"
-    if not path.exists():
-        cache.mkdir(parents=True, exist_ok=True)
+    df = pl.read_parquet(path) if path.exists() else None
+    if df is None or df.height == 0:  # an empty file is an old cached 404: ask again
         rows = _fetch(day, attempts)
         time.sleep(2)
         df = pl.DataFrame(rows, schema={"article": pl.String, "views": pl.Int64, "rank": pl.Int64})
-        df.write_parquet(path)
-    df = pl.read_parquet(path)
+        if df.height:  # a 404 means "not published yet": ask again later, don't cache it
+            cache.mkdir(parents=True, exist_ok=True)
+            df.write_parquet(path)
     return df.filter(~pl.col("article").str.contains(META.pattern))
 
 

@@ -55,6 +55,7 @@ from urllib.parse import urlparse
 
 from cryptobot.holders import X_HOSTS
 from cryptobot.recorder import LIVE
+from cryptobot.social_state import X_KINDS
 
 # Before twscrape is imported: no telemetry, plain httpx (no browser TLS fingerprint).
 os.environ["TWS_TELEMETRY"] = "0"
@@ -79,29 +80,7 @@ REFUSALS_LOGGED_OUT = 3  # 15-minute refusals in a row: the session has expired
 SEARCH_FAILS_BLOCKED = 5  # failed searches in a row: X is probably blocking us
 BLOCKED_PAUSE_S = 1800
 
-KINDS = (
-    "x_ca_posts",
-    "x_ca_posts_1h",
-    "x_ca_authors",
-    "x_ca_likes",
-    "x_ca_views",
-    "x_ca_max_followers",
-    "x_ca_new_share",
-    "x_tk_posts_1h",
-    "x_tk_authors",
-    "x_comm_members",
-    "x_comm_mods",
-    "x_post_likes",
-    "x_post_reposts",
-    "x_post_views",
-    "x_post_author_followers",
-    "x_post_author_days",
-    "x_post_age_h",
-    "x_prof_followers",
-    "x_prof_days",
-    "x_prof_posts",
-    "x_prof_blue",
-)
+KINDS = X_KINDS
 HANDLE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 NOT_PROFILES = {"i", "home", "search", "explore", "hashtag", "intent", "share", "messages"}
 
@@ -226,8 +205,15 @@ class DailyCap:
         day = datetime.now(UTC).strftime("%Y-%m-%d")
         try:
             data = json.loads(self.path.read_text())
-        except (FileNotFoundError, ValueError):
+        except FileNotFoundError:
             data = {}
+        except ValueError:  # unreadable: if it was written today, today's cap is used up
+            written = datetime.fromtimestamp(self.path.stat().st_mtime, UTC)
+            data = (
+                {"day": day, "requests": self.per_day}
+                if written.strftime("%Y-%m-%d") == day
+                else {}
+            )
         return data if data.get("day") == day else {"day": day, "requests": 0}
 
     def left(self) -> int:

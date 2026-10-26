@@ -76,12 +76,21 @@ from pathlib import Path
 import polars as pl
 
 from cryptobot import freesocial, reddit, telegram_feed, tgweb, xapi, xscrape
-from cryptobot.attention import MIN_KEY_CHARS, keys, norm, wiki_top
+from cryptobot.attention import keys, wiki_top
 from cryptobot.recorder import LIVE
+from cryptobot.social_state import (  # noqa: F401 (re-exported)
+    KEEP_MS,
+    MINT_SOURCES,
+    NOW_PATH,
+    OWN_ACCOUNT_KINDS,
+    RANK_KINDS,
+    signals,
+    update,
+)
+from cryptobot.text import MIN_KEY_CHARS, norm
 from cryptobot.watch import WATCH_PATH, Watchlist  # noqa: F401 (re-exported)
 
 SOCIAL = LIVE / "social"
-NOW_PATH = LIVE.parent / "derived" / "social_now.json"
 X_BUDGET_PATH = LIVE.parent / "derived" / "x_budget.json"
 REDDIT_NEW_EVERY_S = 120
 REDDIT_POPULAR_EVERY_S = 600
@@ -103,7 +112,7 @@ SOURCES = {
     # 4chan's official read-only API asks for at most one request a second; once a minute.
     "biz": ("https://a.4cdn.org/biz/catalog.json", 60),
     # Free, no key: the 100 most-captioned meme templates, and Hacker News' front page.
-    "imgflip": ("https://api.imgflip.com/get_memes", 6 * 3600),
+    "imgflip": ("https://api.imgflip.com/get_memes", 3 * 3600),  # under KEEP_MS, or it lapses
     "hn": ("https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=50", 1800),
     # Pump.fun's public list of coins streaming live right now (plain JSON, no key, no
     # challenge): viewers, stream title, pump.fun's own security verdict.
@@ -112,52 +121,13 @@ SOURCES = {
         300,
     ),
 }
-MINT_SOURCES = (  # kinds whose key is a mint address (the rest are keywords)
-    "dex_boosts",
-    "dex_profiles",
-    "dex_takeovers",
-    "gt_trending",
-    "biz_mint",
-    "bsky_mint",
-    "reddit_mint",
-    "mastodon_mint",
-    "farcaster_mint",
-    "tg_mint",
-    "tgweb_mint",
-    "tg_members",
-    "tg_posts_1h",
-    "dex_socials",
-    "dex_websites",
-    "dex_boosts_active",
-    "lemmy_mint",
-    "x_posts_1h",
-    "x_posts_24h",
-    "gdelt_vol_24h",
-    "gdelt_vol_last",
-    "yt_videos_24h",
-    "pf_live",
-    "pf_flagged",
-    *xscrape.KINDS,
-)
-OWN_ACCOUNT_KINDS = {  # describe the coin's own accounts and listings, not mentions of it
-    "tg_members",
-    "dex_socials",
-    "dex_websites",
-    *(k for k in xscrape.KINDS if k.startswith(("x_comm_", "x_post_", "x_prof_"))),
-    # reach and freshness of those who posted: positive only when there were posts
-    "x_ca_likes",
-    "x_ca_views",
-    "x_ca_max_followers",
-    "x_ca_new_share",
-}
 MASTODON_EVERY_S = 900
 YT_POPULAR_EVERY_S = 1800
 FARCASTER_EVERY_S = 900
 JETSTREAM = "wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post"
 BSKY_EVERY_S = 300
 BSKY_WINDOW_MS = 3600 * 1000  # Bluesky mention counts cover the last hour
-WIKI_EVERY_S = 6 * 3600
-KEEP_MS = 6 * 3600 * 1000  # a signal counts for six hours after it was last seen
+WIKI_EVERY_S = 3600  # cached once published, so a poll is usually free; under KEEP_MS
 TICK_S = 10
 
 
@@ -202,7 +172,7 @@ def parse_google(raw: bytes) -> list[tuple[str, str, float, str]]:
     text = raw.decode("utf-8", "replace")
     for rank, item in enumerate(ITEM.findall(text), 1):
         title_m, traffic_m = TITLE.search(item), TRAFFIC.search(item)
-        title = title_m.group(1).strip() if title_m else ""
+        title = html.unescape(title_m.group(1).strip()) if title_m else ""
         traffic = traffic_m.group(1).strip() if traffic_m else ""
         key = norm(title)  # the whole search phrase: its last word is often generic
         if len(key) >= MIN_KEY_CHARS:
@@ -222,15 +192,19 @@ def parse_cg(raw: bytes) -> list[tuple[str, str, float, str]]:
 
 
 def parse_pf_live(raw: bytes) -> list[tuple[str, str, float, str]]:
-    """Coins streaming on pump.fun now: `pf_live` = viewers (the state keeps the peak),
-    and `pf_flagged` when pump.fun's own security verdict is anything but "allow"."""
+    """Coins streaming on pump.fun now: `pf_streaming`, `pf_live` = viewers when pump.fun
+    gives a number (the state keeps the peak), and `pf_flagged` when pump.fun's own
+    security verdict is anything but "allow"."""
     rows = []
     for coin in json.loads(raw):
         mint = coin.get("mint")
         if not mint:
             continue
-        viewers = float(coin.get("num_participants") or 0)
-        rows.append(("pf_live", mint, viewers, coin.get("livestream_title") or ""))
+        title = coin.get("livestream_title") or ""
+        rows.append(("pf_streaming", mint, 1.0, title))
+        viewers = coin.get("num_participants")
+        if isinstance(viewers, int | float) and not isinstance(viewers, bool):
+            rows.append(("pf_live", mint, float(viewers), title))  # unknown is not 0
         verdict = coin.get("security_verdict") or {}
         if verdict.get("verdict") not in (None, "allow"):
             reasons = ",".join(verdict.get("reasons") or [])
@@ -262,6 +236,7 @@ class Spikes:
     def __init__(self, kind: str, alpha: float = 1 / 1440, warmup: int = 60) -> None:
         self.kind, self.alpha, self.warmup = kind, alpha, warmup
         self.base: dict[str, float] = {}
+        self.age: dict[str, int] = {}  # polls each word has been tracked for
         self.polls = 0
 
     def update(self, counts: dict[str, float], min_count: float = 3, ratio: float = 4.0):
@@ -269,14 +244,19 @@ class Spikes:
         rows = []
         for w in set(self.base) | set(counts):
             n = counts.get(w, 0.0)
-            base = self.base.get(w, 0.0)
-            if self.polls > self.warmup and n >= min_count and n >= ratio * (base + 0.5):
-                rows.append((self.kind, w, n / (base + 0.5), ""))
+            base, k = self.base.get(w, 0.0), self.age.get(w, 0)
+            # The average starts at 0, so for its first few hundred polls it sits far
+            # below the word's real level; dividing by 1 - (1 - alpha)^k removes that
+            # (as Adam does), or every ordinary word would "spike" after each restart.
+            expected = base / (1 - (1 - self.alpha) ** k) if k else 0.0
+            if self.polls > self.warmup and n >= min_count and n >= ratio * (expected + 0.5):
+                rows.append((self.kind, w, n / (expected + 0.5), ""))
             new = base + self.alpha * (n - base)
             if new < 0.01 and n == 0:
                 self.base.pop(w, None)  # forget words that stopped appearing
+                self.age.pop(w, None)
             else:
-                self.base[w] = new
+                self.base[w], self.age[w] = new, k + 1
         return rows
 
 
@@ -361,6 +341,20 @@ class StreamCounter:
 BlueskyCounter = StreamCounter
 
 
+def bluesky_text(record: dict) -> str:
+    """A post's text plus the full URLs of its links: the app shortens links in the text
+    (pump.fun/coin/7xKX...), and only the link facet keeps the whole mint address."""
+    text = record.get("text") if isinstance(record.get("text"), str) else ""
+    uris = [
+        f.get("uri", "")
+        for facet in record.get("facets") or []
+        if isinstance(facet, dict)
+        for f in facet.get("features") or []
+        if isinstance(f, dict) and isinstance(f.get("uri"), str)
+    ]
+    return " ".join([text, *uris]).strip()
+
+
 def bluesky_thread(counter: StreamCounter) -> None:
     """Keep a Jetstream connection open in the background; reconnect on any error."""
     import asyncio
@@ -374,11 +368,11 @@ def bluesky_thread(counter: StreamCounter) -> None:
                 async with websockets.connect(JETSTREAM, max_size=2**22) as ws:
                     async for msg in ws:
                         rec = json.loads(msg).get("commit", {}).get("record") or {}
-                        if text := rec.get("text"):
+                        if text := bluesky_text(rec):
                             counter.add(text, int(time.time() * 1000))
             except Exception as e:
                 print(f"bluesky: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-                await asyncio.sleep(30)
+            await asyncio.sleep(30)  # also after a clean close: never reconnect in a tight loop
 
     threading.Thread(target=lambda: asyncio.run(listen()), daemon=True).start()
 
@@ -398,64 +392,21 @@ def hn_titles(raw: bytes) -> list[str]:
 
 
 def parse_wiki(day) -> list[tuple[str, str, float, str]]:
-    rows = []
-    # One quick try: a rate-limited fetch must not stall the other sources; run() retries.
-    for article, rank in wiki_top(day, attempts=1).select("article", "rank").iter_rows():
-        for key in keys(article):
-            rows.append(("wiki_top", key, float(rank), article))
-    return rows
+    """The newest published day's top articles: `day`, or the day before while Wikimedia
+    hasn't published `day` yet (it answers 404 for a few hours after midnight UTC)."""
+    for d in (day, day - timedelta(days=1)):
+        # One quick try: a rate-limited fetch must not stall the other sources; run() retries.
+        top = wiki_top(d, attempts=1)
+        if top.height:
+            return [
+                ("wiki_top", key, float(rank), article)
+                for article, rank in top.select("article", "rank").iter_rows()
+                for key in keys(article)
+            ]
+    return []
 
 
-# State -------------------------------------------------------------------------------
-
-
-def update(state: dict, rows: list[tuple[str, str, float, str]], now_ms: int) -> dict:
-    """Fold a snapshot into the state: mints and keywords -> {kind: [value, last seen]}."""
-    for kind, key, value, _ in rows:
-        bucket = "mints" if kind in MINT_SOURCES else "keywords"
-        entry = state.setdefault(bucket, {}).setdefault(key, {})
-        old = entry.get(kind)
-        if kind in ("dex_boosts", "pf_live"):
-            # totalAmount is cumulative; for a live stream, keep its peak audience
-            value = max(value, old[0]) if old else value
-        elif kind in ("gt_trending", "google_trends", "wiki_top", "cg_trending") and old:
-            value = min(value, old[0])  # best rank seen
-        entry[kind] = [value, now_ms]
-    cut = now_ms - KEEP_MS
-    for bucket in ("mints", "keywords"):
-        for key in list(state.get(bucket, {})):
-            kinds = {k: v for k, v in state[bucket][key].items() if v[1] >= cut}
-            if kinds:
-                state[bucket][key] = kinds
-            else:
-                del state[bucket][key]
-    state["updated_ms"] = now_ms
-    return state
-
-
-def signals(state: dict | None, mint: str, name: str | None, symbol: str | None) -> dict:
-    """What the current state says about one coin (the paper trader logs this)."""
-    if not state:
-        return {"loaded": False}
-    out: dict = {"loaded": True}
-    for kind, (value, _) in state.get("mints", {}).get(mint, {}).items():
-        out[kind] = value
-    for k in {norm(name), norm(symbol)}:
-        if len(k) >= MIN_KEY_CHARS:
-            for kind, (value, _) in state.get("keywords", {}).get(k, {}).items():
-                out[kind] = min(value, out.get(kind, value))
-    # How many separate sources mention the coin (dex, reddit, x...): "talked about in
-    # several places" can then be tested on its own. A per-coin lookup that found nothing
-    # (0 posts, 0 videos) is not a mention, and neither are facts about the coin's own
-    # accounts (its Telegram's size, its X profile's followers).
-    families = {
-        kind.split("_")[0]
-        for kind, value in out.items()
-        if kind != "loaded" and kind not in OWN_ACCOUNT_KINDS and value > 0
-    }
-    out["any"] = bool(families)
-    out["sources"] = len(families)
-    return out
+# State (update and signals live in social_state.py) ---------------------------------
 
 
 def _save(source: str, rows: list[tuple[str, str, float, str]], now_ms: int) -> None:
@@ -486,6 +437,23 @@ PARSERS = {
     "imgflip": parse_imgflip,
     "pf_live": parse_pf_live,
 }
+
+
+LOOKUP_RETRY_S = 600  # a failed per-coin lookup is tried once more, 10 minutes later
+
+
+def take(queue: list[dict], now: float) -> dict | None:
+    """The first queued coin that is due (a retry waits until its time)."""
+    for i, item in enumerate(queue):
+        if item.get("_at", 0) <= now:
+            return queue.pop(i)
+    return None
+
+
+def retry(queue: list[dict], item: dict, now: float, delay: float) -> None:
+    """Queue a coin once more, `delay` seconds from now; a second failure drops it."""
+    if not item.get("_retried"):
+        queue.append({**item, "_retried": True, "_at": now + delay})
 
 
 def x_values(item: dict) -> dict[str, float]:
@@ -656,39 +624,48 @@ def run(path: Path = NOW_PATH) -> None:
                 coin("x", item, got)
         for item in x_results.new():  # X read through the owner's account, one line per coin
             coin("xscrape", item, x_values(item))
-        if queues["dex"]:  # free, ~300 a minute: one per loop is far under the limit
-            item = queues["dex"].pop(0)
+        # Per-coin lookups, one coin at a time per source. A lookup that fails (or, for
+        # DexScreener, finds a coin not indexed yet) is tried once more later.
+        if item := take(queues["dex"], now):  # free, ~300 a minute: far under the limit
             try:
-                coin("dex", item, freesocial.dex_token(item["mint"]))
+                got = freesocial.dex_token(item["mint"])
+                if got is None:
+                    retry(queues["dex"], item, now, LOOKUP_RETRY_S)
+                coin("dex", item, got)
             except Exception as e:
                 print(f"dex: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-        if queues["gdelt"] and gdelt.ready():
-            item = queues["gdelt"].pop(0)
+                retry(queues["dex"], item, now, LOOKUP_RETRY_S)
+        if gdelt.ready() and (item := take(queues["gdelt"], now)):
             try:
                 coin("gdelt", item, gdelt.volume(item.get("name")))
             except Exception as e:
                 print(f"gdelt: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-        if queues["youtube"] and yt is not None and yt.can_search():
-            item = queues["youtube"].pop(0)
+                retry(queues["gdelt"], item, now, LOOKUP_RETRY_S)
+        if yt is not None and yt.can_search() and (item := take(queues["youtube"], now)):
             try:
                 coin("youtube", item, yt.videos_24h(item.get("name"), item.get("symbol")))
             except Exception as e:
                 print(f"youtube: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                retry(queues["youtube"], item, now, LOOKUP_RETRY_S)
         # Telegram web previews: one request at a time, TGWEB_GAP_S apart; listed call
-        # channels first (each every 5 minutes), then watched coins' own Telegrams.
+        # channels first (each every 5 minutes), then watched coins' own Telegrams. Any
+        # error leaves t.me alone for TGWEB_BACKOFF_S.
         if tw.ready():
             due_channels = [c for c in tw_channels if tw_next[c] <= now]
+            item = None
             try:
                 if due_channels:
                     c = due_channels[0]
                     tw_next[c] = now + BSKY_EVERY_S
                     for text in tw.new_posts(c):
                         tw_counter.add(text, int(time.time() * 1000))
-                elif queues["tgweb"]:
-                    item = queues["tgweb"].pop(0)
+                elif item := take(queues["tgweb"], now):
                     coin("tgweb", item, tw.coin(item.get("uri")))
             except Exception as e:
                 print(f"tgweb: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                tw.back_off()
+                if item is not None:
+                    retry(queues["tgweb"], item, now, 2 * tgweb.TGWEB_BACKOFF_S)
         for q in queues.values():
             del q[:-500]  # never let a backlog grow without bound
         if state.get("updated_ms", 0) > state.get("written_ms", 0):
@@ -788,10 +765,15 @@ def report(root: Path) -> str:
         "lemmy_ticker",
         "lemmy_trend",
         "pf_live",
+        "pf_streaming",
         "pf_flagged",
     ]
     for k in kinds:
-        j = j.with_columns(pl.col("social").str.json_path_match(f"$.{k}").is_not_null().alias(k))
+        # "Has it" means a positive value: a lookup that found 0 doesn't count, and `any`
+        # is a true/false field that is always there.
+        raw = pl.col("social").str.json_path_match(f"$.{k}")
+        has = (raw == "true") if k == "any" else (raw.cast(pl.Float64, strict=False) > 0)
+        j = j.with_columns(has.fill_null(False).alias(k))
     sources = pl.col("social").str.json_path_match("$.sources").cast(pl.Int64).fill_null(0)
     j = j.with_columns((sources >= 2).alias("sources_2plus"))
     kinds.insert(1, "sources_2plus")

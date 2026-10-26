@@ -346,3 +346,14 @@ def test_lookups_that_found_nothing_are_not_mentions():
     rows.append(("x_ca_posts", "M", 3.0, ""))
     sig = social.signals(social.update({}, rows, 0), "M", None, None)
     assert sig["sources"] == 1  # now X mentions it
+
+
+def test_daily_cap_fails_closed_for_the_day_when_damaged(tmp_path):
+    path = tmp_path / "cap.json"
+    cap = xscrape.DailyCap(path, per_day=5)
+    assert cap.take()
+    path.write_text("{")  # a crash mid-write
+    assert cap.left() == 0 and not cap.take()
+    old = time.time() - 2 * 86400
+    os.utime(path, (old, old))  # written days ago: a new day starts fresh
+    assert cap.left() == 5
