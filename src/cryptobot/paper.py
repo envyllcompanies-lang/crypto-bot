@@ -1131,6 +1131,7 @@ def run_live(engine: Engine, minutes: float | None, events_dir: Path) -> None:
         finally:
             for t in (task, recording):
                 t.cancel()
+            worker.close()
 
     try:
         asyncio.run(stream())

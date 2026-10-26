@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import re
 import struct
 
 from cryptobot.chain import b58encode
 
+PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 CREATE_EVENT = bytes.fromhex("1b72a94ddeeb6376")
 TRADE_EVENT = bytes.fromhex("bddb7fd34ee661ee")
 
@@ -110,17 +112,43 @@ def decode(data: bytes) -> tuple[str, dict] | None:
     return None
 
 
+# The fields the engine computes with: an event cut short before them is not used.
+REQUIRED = {
+    "create": ("mint", "virtual_token_reserves", "virtual_sol_reserves"),
+    "trade": ("mint", "sol_amount", "token_amount", "is_buy", "user",
+              "virtual_sol_reserves", "virtual_token_reserves"),
+}  # fmt: skip
+INVOKE = re.compile(r"^Program (\w+) invoke \[\d+\]$")
+RETURN = re.compile(r"^Program (\w+) (success|failed)")
+
+
 def events_from_logs(logs: list[str]) -> list[tuple[str, dict]]:
-    """Every create and trade event in a transaction's logs, in log order."""
+    """Every create and trade event the Pump program logged in a transaction, in order.
+
+    The event tags are generic Anchor hashes ("event:TradeEvent"), so any program can
+    log bytes that look like a Pump trade, and the subscription delivers every
+    transaction that merely lists the Pump program. A data line counts only while the
+    Pump program is the one running (the invoke stack in the logs), and only when it
+    holds every field the engine needs."""
     found = []
+    stack: list[str] = []
     for line in logs:
+        if m := INVOKE.match(line):
+            stack.append(m.group(1))
+            continue
+        if m := RETURN.match(line):
+            if stack and stack[-1] == m.group(1):
+                stack.pop()
+            continue
         if not line.startswith("Program data: "):
             continue
+        if stack and stack[-1] != PUMP_PROGRAM:
+            continue  # logged by another program
         try:
             raw = base64.b64decode(line.removeprefix("Program data: "), validate=True)
         except binascii.Error:
             continue
         event = decode(raw)
-        if event:
+        if event and all(event[1].get(k) is not None for k in REQUIRED[event[0]]):
             found.append(event)
     return found

@@ -1,8 +1,8 @@
 """Print the M5 recorder report: what was captured, and whether it can be trusted.
 
 Run with `uv run python -m cryptobot.m5_report > reports/<date>-m5-recorder.md` after
-recording with `uv run python -m cryptobot.recorder`. Every number comes from the
-files in data/live/ through this module.
+recording with `uv run python -m cryptobot.recorder` (or pass a paper run's
+`data/paper/<run>/events` folder). Every number comes from those files through this module.
 """
 
 from __future__ import annotations
@@ -20,8 +20,16 @@ _AMOUNTS = ("sol_amount", "token_amount", "virtual_sol_reserves", "virtual_token
 
 
 def load(root: Path = LIVE) -> dict[str, pl.DataFrame]:
-    tables = ("create", "trade", "sessions")
-    return {t: pl.read_parquet(root / t / "**" / "*.parquet") for t in tables}
+    """Every file of each table under a recorder folder (data/live) or a paper run's
+    events folder. Files written before a field was added have fewer columns: they are
+    combined with the missing columns left empty, not refused."""
+    out = {}
+    for t in ("create", "trade", "sessions"):
+        files = sorted((root / t).rglob("*.parquet"))
+        if not files:
+            raise FileNotFoundError(f"no {t} files under {root}")
+        out[t] = pl.concat([pl.read_parquet(f) for f in files], how="diagonal_relaxed")
+    return out
 
 
 def _pct(x: float | None) -> str:
@@ -145,8 +153,15 @@ def report(data: dict[str, pl.DataFrame]) -> list[str]:
     ]
 
 
-def main() -> None:
-    print("\n".join(report(load())))
+def main(argv: list[str] | None = None) -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument(
+        "root", nargs="?", type=Path, default=LIVE,
+        help="a recorder folder (default data/live) or a run's folder, data/paper/<run>/events",
+    )  # fmt: skip
+    print("\n".join(report(load(parser.parse_args(argv).root))))
 
 
 if __name__ == "__main__":

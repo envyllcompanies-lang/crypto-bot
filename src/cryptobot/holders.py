@@ -36,6 +36,7 @@ import urllib.error
 import urllib.request
 from collections import Counter
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
 import polars as pl
@@ -283,6 +284,17 @@ class LookupWorker:
         self.call = throttled(url)
         self.judge = judge
         self.narratives: asyncio.Queue[tuple] = asyncio.Queue()
+        # Its own threads, not asyncio's default pool: on stop, asyncio.run waits for the
+        # default pool's threads (an RPC call can take a minute) before the run's
+        # summary is written, and systemd kills the trader after 60 s.
+        self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="lookup")
+
+    def close(self) -> None:
+        """Stop without waiting for lookups in flight (their results are not needed)."""
+        self.pool.shutdown(wait=False, cancel_futures=True)
+
+    async def _in_thread(self, fn, *args):
+        return await asyncio.get_running_loop().run_in_executor(self.pool, fn, *args)
 
     def request(
         self, mint: str, wallets: list[str], uri: str, ts: int, name: str, symbol: str
@@ -305,7 +317,7 @@ class LookupWorker:
             mint, wallets, uri, ts, name, symbol = await self.queue.get()
             result, error = None, None
             try:
-                result = await asyncio.to_thread(
+                result = await self._in_thread(
                     lookup, wallets, uri, self.call, fetch_metadata, name, symbol, None
                 )
             except Exception as exc:  # recorded; the holder checks are then not evaluated
@@ -326,7 +338,7 @@ class LookupWorker:
             mint, ts, token = await self.narratives.get()
             out: dict = {"narrative_update": True}
             try:
-                verdict = await asyncio.to_thread(self.judge, token)
+                verdict = await self._in_thread(self.judge, token)
             except Exception as exc:  # recorded; the narrative is then not evaluated
                 out["narrative_error"] = str(exc)[:200] or type(exc).__name__
             else:

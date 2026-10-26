@@ -26,9 +26,8 @@ from pathlib import Path
 
 import polars as pl
 
-from cryptobot.events import CREATE_FIELDS, TRADE_FIELDS, events_from_logs
+from cryptobot.events import CREATE_FIELDS, PUMP_PROGRAM, TRADE_FIELDS, events_from_logs
 
-PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 PUBLIC_WS = "wss://api.mainnet-beta.solana.com"
 LIVE = Path(__file__).resolve().parents[2] / "data" / "live"
 FLUSH_SECONDS = 60
@@ -133,6 +132,9 @@ class Sink:
         return written
 
 
+SUBSCRIBE_TIMEOUT_S = 30
+
+
 async def _session(
     url: str, sink: Sink, deadline: float, stats: dict, on_rows: RowsCallback | None
 ) -> None:
@@ -146,9 +148,10 @@ async def _session(
             "params": [{"mentions": [PUMP_PROGRAM]}, {"commitment": "confirmed"}],
         }
         await ws.send(json.dumps(request))
-        reply = json.loads(await ws.recv())
-        if "error" in reply:
-            raise RuntimeError(f"logsSubscribe refused: {reply['error']}")
+        # An RPC that accepts the socket but never answers must not hang the recorder.
+        reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=SUBSCRIBE_TIMEOUT_S))
+        if "error" in reply or reply.get("id") != 1:
+            raise RuntimeError(f"logsSubscribe refused: {reply.get('error', reply)}")
         last_flush = time.monotonic()
         while time.monotonic() < deadline:
             msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=60))
@@ -180,16 +183,13 @@ async def record(
     """Stream until the deadline, reconnecting on drops.
 
     `on_rows` gets each transaction's create and trade rows as they arrive. `on_gap`
-    gets the time a connection dropped, when the next connection starts, so a consumer
-    knows events may be missing (the same gaps paper.recorded_events finds on disk).
+    gets the time a connection dropped, as soon as the drop is seen (before the wait to
+    reconnect), so a consumer knows events may be missing: the same gaps, at the same
+    times, that paper.recorded_events finds on disk.
     """
     deadline = time.monotonic() + minutes * 60 if minutes else float("inf")
     backoff = 1
-    gap: int | None = None  # end of the last dropped connection, reported on reconnect
     while time.monotonic() < deadline:
-        if gap is not None and on_gap is not None:
-            on_gap(gap)
-        gap = None
         stats = {"connected_ms": now_ms(), "txs": 0, "failed_txs": 0, "truncated_txs": 0}
         reason = "deadline"
         try:
@@ -209,7 +209,8 @@ async def record(
             print(f"session ended ({reason}): {stats['txs']:,} txs", flush=True)
         if reason == "deadline":
             break
-        gap = ended
+        if on_gap is not None:  # at once, at the drop's time: as a replay applies it
+            on_gap(ended)
         backoff = 1 if stats["txs"] else min(backoff * 2, 60)
         await asyncio.sleep(backoff)
 

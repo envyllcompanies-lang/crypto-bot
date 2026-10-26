@@ -81,3 +81,31 @@ def test_events_from_logs_reads_only_program_data_lines():
     ]
     found = events_from_logs(logs)
     assert [k for k, _ in found] == ["trade"]
+
+
+def test_only_events_the_pump_program_logs_count():
+    trade = (
+        "Program data: "
+        + base64.b64encode(TRADE_EVENT + pack(TRADE_FIELDS, sample(TRADE_FIELDS))).decode()
+    )
+    other = "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj"
+    logs = [
+        f"Program {other} invoke [1]",  # another launchpad's (or a forger's) TradeEvent
+        trade,
+        "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [2]",  # Pump, by CPI
+        trade,
+        "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P success",
+        trade,  # back in the other program
+        f"Program {other} success",
+    ]
+    assert [k for k, _ in events_from_logs(logs)] == ["trade"]
+
+
+def test_an_event_cut_short_before_the_reserves_is_dropped():
+    vals = sample(TRADE_FIELDS)
+    short = TRADE_EVENT + pack(TRADE_FIELDS[:5], vals)  # no reserves
+    logs = [
+        "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [1]",
+        "Program data: " + base64.b64encode(short).decode(),
+    ]
+    assert events_from_logs(logs) == []

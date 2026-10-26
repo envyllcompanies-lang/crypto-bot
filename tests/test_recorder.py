@@ -135,3 +135,36 @@ def test_report_passes_on_curve_consistent_toy_token(tmp_path):
     assert "| sell | 1 | 100.00% | 100.00% | 0 |" in text
     assert "continues a known state: 100.00%" in text
     assert "| 95 | 30 | 2 |" in text
+
+
+def test_a_silent_subscribe_reply_times_out_instead_of_hanging(monkeypatch, tmp_path):
+    import asyncio
+    import sys
+    import types
+
+    from cryptobot import recorder
+
+    class SilentSocket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def send(self, msg):
+            pass
+
+        async def recv(self):
+            await asyncio.sleep(3600)  # accepts the socket, never answers
+
+    fake = types.SimpleNamespace(connect=lambda *a, **kw: SilentSocket())
+    monkeypatch.setitem(sys.modules, "websockets", fake)
+    monkeypatch.setattr(recorder, "SUBSCRIBE_TIMEOUT_S", 0.05)
+    stats = {"txs": 0}
+    sink = recorder.Sink(tmp_path, recorder.SCHEMAS)
+    import time
+
+    start = time.monotonic()
+    with __import__("pytest").raises(TimeoutError):
+        asyncio.run(asyncio.wait_for(recorder._session("ws://x", sink, 1e18, stats, None), 5))
+    assert time.monotonic() - start < 1  # the subscribe timeout, not the test's own 5 s
