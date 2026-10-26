@@ -63,3 +63,26 @@ A shorter window may pick worse leaders.
   before.
 - **If it fails:** the late-curve family goes no further. Without a faster or
   differently priced feed, no strategy family tested here makes money after fees.
+
+## Amendments, 26 Oct 2026 (before any live result was seen)
+
+No live result of this test had been seen when these were written: the server had not
+pushed any report.
+
+1. **The leader list was ten minutes, not a day.** "1 day by default" above was not
+   what ran: until 26 Oct (commit c86103c) the nightly list was built at 00:10 UTC from
+   the newest day folder only, about ten minutes of trades. From 26 Oct it covers the
+   last 24 hours. The judge shows trades before and after the fix apart; the pass rule
+   uses all of them, as registered.
+2. **How a pass is read.** The backtest family this rule comes from made its money on
+   trades still open at graduation (`reports/2026-10-26-quick-hold-graduation.md`), and
+   live paper trading values those at the final curve price, decided and filled at
+   once. The pass rule stays as written, but a pass whose mean without graduation exits
+   is zero or below is reported as "pass only through graduation exits", not as
+   evidence of an edge.
+3. **The judge.** `uv run python -m cryptobot.prereg` applies these rules: live runs
+   only (no replays), the test starts at the commit that put the variants live (14 Oct
+   02:30 UTC), it stops at the 300th closed trade of
+   `late_p90_leader|tp25|sl15|d2s|direct` (by close time) or at the end of 28 Oct UTC,
+   whichever comes first. "Leader minus control" uses a Welch interval; the leader
+   variant's tokens are a subset of the control's, so that interval is conservative.

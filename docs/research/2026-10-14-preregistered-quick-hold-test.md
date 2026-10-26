@@ -60,3 +60,31 @@ its first-half winner lost 6.2% afterwards. Only data it has never seen can sett
 - **If it fails:** record the result here. That would close the last lead from the
   history: no rule found on 1 Sep-8 Oct with free data and a 2 s delay would then have
   held up out of sample.
+
+## Amendments, 26 Oct 2026 (before any live result was seen)
+
+No live result of this test had been seen when these were written: the server had not
+pushed any report.
+
+1. **Correction: the backtest profit was carried by graduation trades.** "Its profit is
+   not carried by a few trades" above is wrong. Rerunning the cell
+   (`reports/2026-10-26-quick-hold-graduation.md`) shows all of it comes from the 7-9%
+   of trades still open at graduation, worth +56-59% each when sold into the PumpSwap
+   pool; the other trades lost 2.3% (1-23 Sep) and 3.0% (24 Sep-8 Oct) per trade. The
+   graduation check that should have shown this compared flags with "graduated" only
+   and missed the pool-valued exits. Two more doubts: some pool sales used the pool's
+   opening price where the swap data had gaps, and the 1-23 Sep leader list was chosen
+   from wallets that profited on those same tokens, so that half was not out of sample
+   for the leader rule.
+2. **How a pass is read.** Live, a position open at graduation is valued at the final
+   curve price, decided and filled at once: kinder than any real sale. The pass rule
+   stays as written, but a pass whose mean without graduation exits is zero or below is
+   reported as "pass only through graduation exits", not as evidence of an edge.
+3. **The leader list was ten minutes, not a day.** Until 26 Oct (commit c86103c) the
+   nightly list was built at 00:10 UTC from the newest day folder only, about ten
+   minutes of trades. From 26 Oct it covers the last 24 hours. The judge shows trades
+   before and after the fix apart; the pass rule uses all of them, as registered.
+4. **The judge.** `uv run python -m cryptobot.prereg` applies these rules: live runs
+   only (replays reproduce live trades and would count them twice), the test starts at
+   the commit that put the variants live (14 Oct 04:24 UTC), it stops at the 300th
+   closed trade (by close time) or at the end of 4 Nov UTC, whichever comes first.
