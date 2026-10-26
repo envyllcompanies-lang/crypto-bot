@@ -600,27 +600,23 @@ def report(run: Path) -> list[str]:
     idle = wallets - table.height
     lines += ["", f"{idle} of {wallets} wallet variants closed no trades.", ""]
 
-    core = core_name()
     lines += [
-        f"## Network cost sensitivity ({core})",
+        "## Network cost sensitivity (every variant that closed trades)",
         "",
-        "Expectancy of V1's core rule if each transaction also paid this much in priority fee "
-        "and tip:",
+        "The variants above pay no network costs. Expectancy per trade if each transaction "
+        "(buy and sell) also paid this much in priority fee and tip:",
         "",
-        "| Universe | " + " | ".join(f"{x:g} SOL/tx" for x in NETWORK_LEVELS_SOL) + " |",
-        "|---|" + "---|" * len(NETWORK_LEVELS_SOL),
+        "| Variant | Trades | " + " | ".join(f"{x:g} SOL/tx" for x in NETWORK_LEVELS_SOL) + " |",
+        "|---|---|" + "---|" * len(NETWORK_LEVELS_SOL),
     ]
-    for u in [v["universe"] for v in variants if v["name"] == f"{v['universe']}|{core}"]:
-        sub = trades.filter(pl.col("variant") == f"{u}|{core}")
+    for name in sorted(trades["variant"].unique().to_list()):
+        sub = trades.filter(pl.col("variant") == name)
         cells = []
         for level in NETWORK_LEVELS_SOL:
-            if sub.is_empty():
-                cells.append("n/a")
-                continue
             net = to_lamports(level)
             adj = (sub["pnl_lamports"] - 2 * net) / (sub["cost_lamports"] + net)
             cells.append(_pct(adj.mean()))
-        lines.append(f"| {u} | " + " | ".join(cells) + " |")
+        lines.append(f"| {md_cell(name)} | {sub.height:,} | " + " | ".join(cells) + " |")
     return [*lines, "", *caveats(trades.height)]
 
 

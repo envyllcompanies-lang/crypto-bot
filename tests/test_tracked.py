@@ -175,3 +175,22 @@ def test_load_recorded_reads_recent_recorder_files(tmp_path):
     df = trades.collect()
     assert df.height == 2 and set(df["user"]) == {"a"}
     assert creates["mint"].to_list() == [create_row()["mint"]]
+
+
+def test_recent_days_are_the_last_days_of_data_across_all_runs(tmp_path):
+    from cryptobot.tracked import _recent
+
+    def folder(root, day, n=1):
+        d = tmp_path / root / "trade" / day
+        d.mkdir(parents=True)
+        for i in range(n):
+            (d / f"{i}.parquet").write_bytes(b"")
+        return d
+
+    folder("old_run", "2026-10-01")  # a run that ended weeks ago: not recent
+    folder("run", "2026-10-24")
+    folder("run", "2026-10-25")  # yesterday: the whole day is inside "1 day"
+    folder("run", "2026-10-26")  # today, ten minutes in
+    roots = [tmp_path / "old_run", tmp_path / "run"]
+    got = {p.parent.name for p in _recent(roots, "trade", 1)}
+    assert got == {"2026-10-25", "2026-10-26"}

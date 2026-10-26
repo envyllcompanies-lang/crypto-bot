@@ -28,6 +28,7 @@ import argparse
 import json
 import sys
 from dataclasses import asdict, dataclass
+from datetime import date, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -219,10 +220,20 @@ def _read(files: list[Path]) -> pl.DataFrame | None:
     return pl.concat([pl.read_parquet(f) for f in files], how="diagonal_relaxed")
 
 
-def _recent(root: Path, table: str, days: int) -> list[Path]:
-    """Files of one table in the newest `days` date folders (layout <table>/<date>/)."""
-    dates = sorted(d for d in (root / table).glob("20??-??-??") if d.is_dir())[-days:]
-    return [f for d in dates for f in sorted(d.glob("*.parquet"))]
+def _recent(roots: list[Path], table: str, days: int) -> list[Path]:
+    """Files of one table (layout <root>/<table>/<date>/) in the date folders that can
+    hold the last `days` days before the newest data, across all roots: the newest date
+    and the `days` dates before it. Folders are named by the UTC date they were written,
+    so the newest is usually a partial day (at 00:10 UTC, ten minutes); the caller cuts
+    rows to the exact window. Picking per root instead would let a run that ended weeks
+    ago pass its last day off as recent."""
+    folders = [d for r in roots for d in (r / table).glob("20??-??-??") if d.is_dir()]
+    if not folders:
+        return []
+    newest = max(date.fromisoformat(d.name) for d in folders)
+    first = newest - timedelta(days=days)
+    keep = sorted((d for d in folders if date.fromisoformat(d.name) >= first), key=str)
+    return [f for d in keep for f in sorted(d.glob("*.parquet"))]
 
 
 def load_recorded(
@@ -231,8 +242,8 @@ def load_recorded(
     """Recent trades (lazy) and creates from the recorder folder and every paper run."""
     if roots is None:
         roots = [LIVE, *sorted(PAPER.glob("*/events"))]
-    trade_files = [f for r in roots for f in _recent(r, "trade", days)]
-    creates = _read([f for r in roots for f in _recent(r, "create", days + 1)])
+    trade_files = _recent(roots, "trade", days)
+    creates = _read(_recent(roots, "create", days + 1))
     if not trade_files or creates is None:
         raise FileNotFoundError("no recorded trade and create events found")
     cols = [*TRADE_COLS[:-1], "received_ms", "signature", "event_index"]
@@ -242,6 +253,9 @@ def load_recorded(
         .rename({"received_ms": "ts_ms"})
         .select(TRADE_COLS)
     )
+    newest = trades.select(pl.col("ts_ms").max()).collect().item()
+    if newest is not None:  # exactly `days` x 24 hours, ending at the newest trade
+        trades = trades.filter(pl.col("ts_ms") >= newest - days * 86_400_000)
     return trades, creates.unique("mint")
 
 

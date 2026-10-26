@@ -148,8 +148,10 @@ def test_bundled_holders_block_entry():
     assert not run_until_lookup(BUNDLE)
 
 
-def test_failed_lookup_counts_as_not_evaluated():
-    assert run_until_lookup(None, error="HTTPError")
+def test_failed_lookup_blocks_entry():
+    # V1's holder and X checks couldn't run: the rule can't be checked, so no trade.
+    assert not run_until_lookup(None, error="HTTPError")
+    assert not run_until_lookup(None, error="busy")
 
 
 def test_recorded_lookups_replay_and_switch_checks_on(tmp_path):
@@ -225,3 +227,24 @@ def test_engine_merges_a_later_narrative_without_moving_the_lookup():
     assert eng.results_by_mint[MINT]["narrative"]["score"] == 3
     assert eng.results_by_mint[MINT]["x_kind"] == "community"
     assert eng.stats["narratives_done"] == 1 and eng.stats["lookups_done"] == 1
+
+
+def test_wallets_funded_seconds_ago_count_as_fresh_and_reads_are_confirmed():
+    import time
+
+    seen = []
+
+    def call(method, params):
+        seen.append(params[-1].get("commitment"))
+        if method == "getMultipleAccounts":
+            return {"value": [{"lamports": 10**9}] * 5}
+        if method == "getTransaction":
+            return None
+        if params[0] in ("b1", "b2", "b3"):  # bundle wallets: no transaction visible yet
+            return []
+        return [{"signature": "s", "blockTime": 1}]  # two old wallets
+
+    res = lookup(["b1", "b2", "b3", "o1", "o2"], "", call, fetch=lambda uri: {})
+    assert set(seen) == {"confirmed"}  # not the RPC's "finalized" default, 13 s behind
+    now = int(time.time() * 1000)
+    assert classify(res, now_ms=now)["top5_funding_not_clustered"] is False

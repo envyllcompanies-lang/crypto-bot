@@ -58,8 +58,8 @@ def records(creates: pl.DataFrame, trades: pl.DataFrame | pl.LazyFrame) -> pl.Da
 
 def load_recorded(days: int = 14) -> tuple[pl.DataFrame, pl.LazyFrame]:
     roots = [LIVE, *sorted(PAPER.glob("*/events"))]
-    creates = _read([f for r in roots for f in _recent(r, "create", days)])
-    trade_files = [f for r in roots for f in _recent(r, "trade", days)]
+    creates = _read(_recent(roots, "create", days))
+    trade_files = _recent(roots, "trade", days)
     if creates is None or not trade_files:
         raise FileNotFoundError("no recorded create and trade events found")
     trades = pl.concat(

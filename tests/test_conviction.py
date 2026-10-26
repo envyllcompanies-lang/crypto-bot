@@ -330,7 +330,9 @@ def test_report_shows_v1_as_stated_tiers_and_spot_checks(tmp_path):
     assert "| `Evil \\| [click](https://x.example) **coin` (`EVL\\|`) |" in row
     assert "community `https://x.com/i/communities/9`" in row
     assert "| 71 good | 5/5 `t` |" in row
-    assert "| final_stretch_50 | n/a | n/a | n/a | n/a |" in text  # no network-cost data
+    network = text[text.index("## Network cost sensitivity") :]
+    assert "| new_pairs\\|dip40\\|tp45\\|sl0\\|d2s | 1 |" in network
+    assert "final_stretch_50" not in network.split("## Read this")[0]  # it closed none
     summary = json.loads((run / "summary.json").read_text())
     assert summary["equity_lamports"] == summary["final_balance_lamports"]  # all closed
 

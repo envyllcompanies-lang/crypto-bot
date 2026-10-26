@@ -78,9 +78,8 @@ from cryptobot.holders import LOOKUP_SCHEMA, PUBLIC_RPC, TOP_N, LookupWorker, cl
 from cryptobot.narrative import make_judge
 from cryptobot.recorder import LIVE, PUBLIC_WS, SCHEMAS, Sink, next_seq, now_ms, record
 from cryptobot.replay import TICK_MS, Buy, FillConfig, Position, Sell, TradeResult, View
-from cryptobot.social import NOW_PATH as SOCIAL_NOW
-from cryptobot.social import WATCH_PATH as SOCIAL_WATCH
-from cryptobot.social import signals as social_signals
+from cryptobot.social_state import NOW_PATH as SOCIAL_NOW
+from cryptobot.social_state import signals as social_signals
 from cryptobot.tracked import TRACKED_PATH, load_list, load_top
 from cryptobot.v1 import (
     FINAL_STRETCH_MAX_AGE_MS,
@@ -93,6 +92,7 @@ from cryptobot.v1 import (
     default_variants,
     passes,
 )
+from cryptobot.watch import WATCH_PATH as SOCIAL_WATCH
 
 PAPER = LIVE.parent / "paper"
 START_BALANCE = to_lamports(1.0)
@@ -520,6 +520,10 @@ class Engine:
                 checks["lookup_done"] = False
             elif u.kind != "conviction" and tok.mint in self.results_by_mint:
                 checks.update(classify(self.results_by_mint[tok.mint], row["received_ms"]))
+            elif u.kind != "conviction":
+                # The lookup failed or was refused ("busy"): V1's holder and X checks
+                # can't be done, and a rule that can't be checked doesn't pass.
+                checks["lookup_ok"] = False
         result = self.results_by_mint.get(tok.mint)
         row = self.lookups.get(tok.mint)
         lookup_ms = None if row is None or result is None else row["received_ms"]
@@ -554,7 +558,9 @@ class Engine:
             if self.tracked is not None:
                 features["tracked_holders"] = tok.tracked_holders(self.tracked)
             # Logged only, not traded on (CLAUDE.md "Social data"); social.report measures it.
-            features["social"] = social_signals(self.social, tok.mint, tok.name, tok.symbol)
+            features["social"] = social_signals(
+                self.social, tok.mint, tok.name, tok.symbol, now_ms=ts
+            )
             if u.kind == "conviction":
                 features["conviction"] = (
                     conv.describe() if conv else {"blocks": blocks(tok, result, lookup_ms, ts)}
@@ -1113,10 +1119,18 @@ def run_live(engine: Engine, minutes: float | None, events_dir: Path) -> None:
 
     async def stream() -> None:
         task = asyncio.create_task(worker.run())
+        recording = asyncio.create_task(record(minutes, url, sink, on_rows, engine.on_gap))
         try:
-            await record(minutes, url, sink, on_rows, engine.on_gap)
+            # The lookup worker never returns on its own: if it does (an exception), stop
+            # the run (systemd starts a new one) rather than trade on with every candidate
+            # refused as "busy".
+            done, _ = await asyncio.wait({task, recording}, return_when=asyncio.FIRST_COMPLETED)
+            if task in done:
+                raise RuntimeError(f"lookup worker stopped: {task.exception()!r}")
+            recording.result()
         finally:
-            task.cancel()
+            for t in (task, recording):
+                t.cancel()
 
     try:
         asyncio.run(stream())

@@ -69,6 +69,12 @@ Fetch = Callable[[str], dict | None]
 Judge = Callable[[dict], dict | None]
 
 
+# "confirmed" (about 1 s behind) rather than the RPC default "finalized" (about 13 s):
+# lookups run seconds after launch, and a bundle wallet funded in those 13 s would
+# otherwise show no transactions and pass as an old, unrelated holder.
+COMMITMENT = "confirmed"
+
+
 def rpc(method: str, params: list, url: str = PUBLIC_RPC, retries: int = 4) -> object:
     """One JSON-RPC call with exponential backoff on network errors and rate limits."""
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
@@ -169,11 +175,20 @@ def lookup(
     first_ms: list[int | None] = []
     funders: list[str | None] = []
     if wallets:
-        accounts = call("getMultipleAccounts", [wallets, {"encoding": "base64"}])["value"]
+        accounts = call(
+            "getMultipleAccounts", [wallets, {"encoding": "base64", "commitment": COMMITMENT}]
+        )["value"]
         balances = [a["lamports"] if a else 0 for a in accounts]
     for wallet in wallets:
-        sigs = call("getSignaturesForAddress", [wallet, {"limit": SIGNATURE_PAGE}])
-        if not sigs or len(sigs) >= SIGNATURE_PAGE:
+        sigs = call(
+            "getSignaturesForAddress",
+            [wallet, {"limit": SIGNATURE_PAGE, "commitment": COMMITMENT}],
+        )
+        if not sigs:  # a holder with no transaction yet: funded seconds ago, so fresh
+            first_ms.append(int(time.time() * 1000))
+            funders.append(None)
+            continue
+        if len(sigs) >= SIGNATURE_PAGE:  # an old, busy wallet: its first funder is unknown
             first_ms.append(None)
             funders.append(None)
             continue
@@ -181,7 +196,10 @@ def lookup(
         first_ms.append(oldest["blockTime"] * 1000 if oldest.get("blockTime") else None)
         tx = call(
             "getTransaction",
-            [oldest["signature"], {"encoding": "json", "maxSupportedTransactionVersion": 0}],
+            [
+                oldest["signature"],
+                {"encoding": "json", "maxSupportedTransactionVersion": 0, "commitment": COMMITMENT},
+            ],  # fmt: skip
         )
         funders.append(funder_of(tx, wallet))
     out = {"wallets": wallets, "balances": balances, "first_ms": first_ms, "funders": funders}
@@ -270,7 +288,12 @@ class LookupWorker:
         self, mint: str, wallets: list[str], uri: str, ts: int, name: str, symbol: str
     ) -> None:
         if self.queue.qsize() >= MAX_QUEUE:
-            self._deliver(mint, ts, None, "busy")
+            # Delivered after the trade being processed, as a replay would apply it,
+            # not in the middle of the engine's gate checks.
+            try:
+                asyncio.get_running_loop().call_soon(self._deliver, mint, ts, None, "busy")
+            except RuntimeError:  # no event loop (tests): deliver now
+                self._deliver(mint, ts, None, "busy")
         else:
             self.queue.put_nowait((mint, wallets, uri, ts, name, symbol))
 
@@ -293,6 +316,10 @@ class LookupWorker:
                     token = {"name": name, "symbol": symbol}
                     token |= {k: result.get(k) for k in NARRATIVE_FIELDS}
                     self.narratives.put_nowait((mint, ts, token))
+                else:  # say so, or a rule waiting for the verdict would wait for good
+                    self._deliver(
+                        mint, ts, {"narrative_update": True, "narrative_error": "busy"}, None
+                    )
 
     async def _judge(self) -> None:
         while True:
