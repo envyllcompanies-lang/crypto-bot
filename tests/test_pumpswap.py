@@ -62,6 +62,10 @@ def test_a_position_open_at_graduation_sells_into_the_pool():
     # an empty pool path: the sell lands on the deposit itself
     pool = (SOL, TOK, np.empty(0, np.int64), np.empty(0), np.empty(0))
     sold = simulate(ts, vsol, vtok, 1_000, entry, (hold,), (NO_FEES,), Params(), pool=pool)
-    assert plain[0][8] == "graduated" and sold[0][8] == "graduated_pool"
+    # no swap before the sale: priced at the opening deposit, and flagged as such
+    assert plain[0][8] == "graduated" and sold[0][8] == "graduated_pool_open"
     # the pool is shallower than the curve, so the same tokens fetch less
     assert sold[0][10] < plain[0][10]
+    anchored = (SOL, TOK, np.array([0], np.int64), np.array([float(SOL)]), np.array([float(TOK)]))
+    sold = simulate(ts, vsol, vtok, 1_000, entry, (hold,), (NO_FEES,), Params(), pool=anchored)
+    assert sold[0][8] == "graduated_pool"  # swap data before the sale

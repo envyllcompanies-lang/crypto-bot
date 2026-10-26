@@ -679,10 +679,10 @@ def run(path: Path = NOW_PATH) -> None:
 
 def report(root: Path) -> str:
     """Closed paper trades by the social signals logged at their gate (all runs)."""
-    from cryptobot.m6_report import Z95, _pct
+    from cryptobot.review import live_runs
 
     trades, gates = [], []
-    for run_dir in sorted(p for p in root.iterdir() if p.is_dir()) if root.exists() else []:
+    for run_dir in live_runs(root):  # replays reproduce live trades: counting both doubles
         t = sorted((run_dir / "trades").glob("*/*.parquet"))
         g = sorted((run_dir / "gates").glob("*/*.parquet"))
         if t and g:
@@ -787,13 +787,14 @@ def report(root: Path) -> str:
     ]
     for k in kinds:
         for has in (True, False):
-            r = j.filter(pl.col(k) == has)["net_return"]
+            sub = j.filter(pl.col(k) == has)
+            r = sub["net_return"]
             if r.len() == 0:
                 continue
-            half = Z95 * (r.std() or 0) / r.len() ** 0.5
             lines.append(
-                f"| {k} | {'yes' if has else 'no'} | {r.len():,} | {_pct(r.mean())} "
-                f"[{_pct(r.mean() - half)} to {_pct(r.mean() + half)}] |"
+                f"| {k} | {'yes' if has else 'no'} | {r.len():,} | "
+                + _mean_ci(r, sub["mint"])
+                + " |"
             )
     lines += [
         "",
@@ -804,14 +805,11 @@ def report(root: Path) -> str:
     ]
     for k, cut in VALIDITY.items():
         for label, cond in ((f"> {cut}", pl.col(k) > cut), (f"<= {cut}", pl.col(k) <= cut)):
-            r = j.filter(cond)["net_return"]
+            sub = j.filter(cond)
+            r = sub["net_return"]
             if r.len() == 0:
                 continue
-            half = Z95 * (r.std() or 0) / r.len() ** 0.5
-            lines.append(
-                f"| {k} | {label} | {r.len():,} | {_pct(r.mean())} "
-                f"[{_pct(r.mean() - half)} to {_pct(r.mean() + half)}] |"
-            )
+            lines.append(f"| {k} | {label} | {r.len():,} | " + _mean_ci(r, sub["mint"]) + " |")
     lines += [
         "",
         "## Per-coin numbers, among trades where they were looked up",
@@ -824,15 +822,23 @@ def report(root: Path) -> str:
     for k, cut in COUNT_CUTS.items():
         v = pl.col("social").str.json_path_match(f"$.{k}").cast(pl.Float64)
         for label, cond in ((f"> {cut}", v > cut), (f"<= {cut}", v <= cut)):
-            r = j.filter(cond)["net_return"]
+            sub = j.filter(cond)
+            r = sub["net_return"]
             if r.len() == 0:
                 continue
-            half = Z95 * (r.std() or 0) / r.len() ** 0.5
-            lines.append(
-                f"| {k} | {label} | {r.len():,} | {_pct(r.mean())} "
-                f"[{_pct(r.mean() - half)} to {_pct(r.mean() + half)}] |"
-            )
+            lines.append(f"| {k} | {label} | {r.len():,} | " + _mean_ci(r, sub["mint"]) + " |")
     return "\n".join([*lines, ""])
+
+
+def _mean_ci(r: pl.Series, mints: pl.Series) -> str:
+    """Mean with a 95% interval clustered by token: a token several universes traded is
+    one piece of evidence."""
+    from cryptobot.m6_report import _pct, clustered_half
+
+    half = clustered_half(r, mints)
+    if half is None:
+        return f"{_pct(r.mean())} [n/a]"
+    return f"{_pct(r.mean())} [{_pct(r.mean() - half)} to {_pct(r.mean() + half)}]"
 
 
 # Validity measures from features.TokenState and the split point the report uses.

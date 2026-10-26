@@ -97,21 +97,23 @@ def _ci(m: float | None, h: float | None) -> str:
 def graduation_check(df: pl.DataFrame, cell: dict) -> dict:
     """How much of a cell's result rests on positions open when the curve completed.
 
-    Those are valued at the final curve price; after graduation the token trades on
-    PumpSwap, which our data doesn't cover. `needed` is the mean return the graduated
+    They are valued at the final curve price, or with --pool-fills sold into the PumpSwap
+    pool (screen.py), and they can carry a cell: `needed` is the mean return the graduated
     positions must really achieve for the cell to break even on the holdout.
     """
     keys = ["entry", "exit", "age"]
     c = df.filter(*[pl.col(k) == cell[k] for k in keys], pl.col("period") == "holdout")
     if cell["led"] != "either":
         c = c.filter(pl.col("led") == (cell["led"] == "yes"))
-    grad = pl.col("flag") == "graduated"
+    grad = pl.col("flag").str.starts_with("graduated")  # curve, pool or pool-open valued
     g, rest = c.filter(grad), c.filter(~grad)
     share = g.height / c.height if c.height else 0.0
     rest_mean = rest["net_return"].mean() if rest.height else 0.0
     needed = None if share == 0 else -(1 - share) * rest_mean / share
+    pool = g.filter(pl.col("flag").str.starts_with("graduated_pool")).height
     return {
         "share": share,
+        "valued": "sold into the PumpSwap pool" if pool else "valued at the final curve price",
         "graduated_mean": g["net_return"].mean() if g.height else None,
         "rest_mean": rest_mean,
         "needed": needed,
@@ -143,7 +145,7 @@ def report(
         )
     if honest.height:
         best = honest.row(0, named=True)
-        ok = best["mean_h"] is not None and best["mean_h"] - best["half_h"] > 0
+        ok = best["half_h"] is not None and best["mean_h"] - best["half_h"] > 0
         lines += [
             "",
             f"Discovery winner on the holdout: **{_pct(best['mean_h'])}** per trade "
@@ -154,12 +156,11 @@ def report(
         lines += [
             "",
             f"**Graduation check for the winner (holdout):** {_pct(grad['share'])} of its "
-            "trades were still open when the curve completed. They are valued at the final "
-            f"curve price ({_pct(grad['graduated_mean'])} on average); the other trades "
-            f"averaged {_pct(grad['rest_mean'])}. To break even, the graduated positions "
-            f"must really return at least {_pct(grad['needed'])} when sold on PumpSwap, so "
-            "this result stands or falls on post-graduation fills, which this data can't "
-            "measure.",
+            f"trades were still open when the curve completed. They are {grad['valued']} "
+            f"({_pct(grad['graduated_mean'])} on average); the other trades averaged "
+            f"{_pct(grad['rest_mean'])}. Without the graduated trades the cell would need "
+            f"them to return at least {_pct(grad['needed'])} to break even, so this result "
+            "stands or falls on how positions open at graduation are valued.",
         ]
     pos_disc = honest.filter(pl.col("mean") > 0)
     both_pos = pos_disc.filter(pl.col("mean_h") > 0)
@@ -183,13 +184,53 @@ def report(
     return "\n".join([*lines, ""])
 
 
+def cell_breakdown(df: pl.DataFrame, cell: dict) -> str:
+    """One cell by period: all trades, then split by whether the position was still
+    open at graduation (and how it was valued), with medians and the top-10 effect."""
+    keys = ["entry", "exit", "age"]
+    c = df.filter(*[pl.col(k) == cell[k] for k in keys])
+    if cell["led"] != "either":
+        c = c.filter(pl.col("led") == (cell["led"] == "yes"))
+    grad = pl.col("flag").str.starts_with("graduated")
+    lines = [
+        f"## Cell {cell['entry']} | {cell['exit']} | {cell['age']} | leader {cell['led']}",
+        "",
+        "| Period | Trades | Mean | Median | Open at graduation | Their mean | "
+        "Mean of the rest | Mean without the top 10 |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for period in ("discovery", "holdout"):
+        t = c.filter(pl.col("period") == period)
+        if t.is_empty():
+            continue
+        g, rest = t.filter(grad), t.filter(~grad)
+        top_cut = t["net_return"].sort(descending=True).slice(10)
+        lines.append(
+            f"| {period} | {t.height:,} | {_pct(t['net_return'].mean())} | "
+            f"{_pct(t['net_return'].median())} | {_pct(g.height / t.height)} | "
+            f"{_pct(g['net_return'].mean()) if g.height else 'n/a'} | "
+            f"{_pct(rest['net_return'].mean()) if rest.height else 'n/a'} | "
+            f"{_pct(top_cut.mean()) if top_cut.len() else 'n/a'} |"
+        )
+    flags = c.filter(grad)["flag"].value_counts().sort("flag").rows()
+    lines += ["", "Graduation valuations: " + (", ".join(f"{f} {n:,}" for f, n in flags) or "none")]
+    return "\n".join([*lines, ""])
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--timing", type=Path, default=DERIVED / "timing_d0")
     parser.add_argument("--follow", type=Path, default=DERIVED / "follow_d0")
     parser.add_argument("--delay-ms", type=int, default=0)
+    parser.add_argument(
+        "--cell", help="print one cell's breakdown instead, e.g. p90,hold1m,5-15m,yes"
+    )
     args = parser.parse_args(argv)
     df = cells(args.timing, args.follow)
+    if args.cell:
+        entry, exit_, age, led = args.cell.split(",")
+        print(cell_breakdown(df, {"entry": entry, "exit": exit_, "age": age, "led": led}))
+        return
     honest, hindsight = search(df)
     grad = graduation_check(df, honest.row(0, named=True)) if honest.height else None
     print(report(honest, hindsight, args.delay_ms, grad))

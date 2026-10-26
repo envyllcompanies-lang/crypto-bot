@@ -35,7 +35,7 @@ from pathlib import Path
 
 import polars as pl
 
-from cryptobot.screen import DISCOVERY_END, _classic_creates, _pct, _summary
+from cryptobot.screen import DISCOVERY_END, _ci, _classic_creates, _pct, _summary
 from cryptobot.slinky import SLINKY_ROOT, files
 from cryptobot.text import MIN_KEY_CHARS, norm  # noqa: F401 (re-exported)
 
@@ -213,8 +213,7 @@ def report(df: pl.DataFrame, trades: pl.DataFrame | None) -> str:
         for r in s.iter_rows(named=True):
             lines.append(
                 f"| {r['entry']} | {r['exit']} | {r['period']} | {r['group']} "
-                f"| {r['n']:,} | {_pct(r['mean'])} [{_pct(r['mean'] - r['half'])} to "
-                f"{_pct(r['mean'] + r['half'])}] |"
+                f"| {r['n']:,} | {_ci(r['mean'], r['half'])} |"
             )
     lines += ["", "Matched examples (name, ticker, article rank):", ""]
     for name, symbol, rank in (

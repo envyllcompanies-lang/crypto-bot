@@ -439,3 +439,15 @@ def test_a_stale_state_is_not_loaded_and_old_entries_are_left_out():
     assert sig["loaded"] and "dex_boosts" not in sig and sig["gt_trending"] == 3.0
     stopped = last + 31 * 60_000  # no update for 31 minutes
     assert social.signals(st, "M", None, None, now_ms=stopped) == {"loaded": False, "stale": True}
+
+
+def test_clustered_interval_counts_one_token_once():
+    import polars as pl
+
+    from cryptobot.m6_report import clustered_half
+
+    r = pl.Series([0.1, 0.1, 0.1, -0.1, -0.1, -0.1])
+    by_trade = clustered_half(r, pl.Series(["a", "b", "c", "d", "e", "f"]))
+    by_token = clustered_half(r, pl.Series(["a", "a", "a", "d", "d", "d"]))
+    assert by_token > by_trade  # three variants on one token are not three tokens
+    assert clustered_half(r.head(1), pl.Series(["a"])) is None

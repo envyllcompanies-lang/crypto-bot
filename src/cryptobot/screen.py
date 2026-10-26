@@ -286,8 +286,14 @@ def _exit_row(name, x, venue, p, ts, grad, n, i, land_buy, tokens, cost, entry_p
             reserves = pumpswap.state_at(sol, tok, pts, ps, pt, land)
             gross = pumpswap.sell_into(*reserves, tokens, venue.fee_bps_per_side)
             proceeds = gross + p.rent_lamports
+            # With no swap in the data before the sale, the pool's opening price is used:
+            # right after graduation that is the real price, but a gap in the swap data
+            # makes it far too kind (the median p90 graduate fell ~50% in its first
+            # minutes). Flagged so reports can leave these sales out.
+            opened_only = int(np.searchsorted(pts, land, side="right")) == 0
+            flag = "graduated_pool_open" if opened_only else "graduated_pool"
             return (name, x.name, venue.name, created_ms, int(ts[i]), land_buy, land, why,
-                    "graduated_pool", cost, proceeds, (proceeds - cost) / cost,
+                    flag, cost, proceeds, (proceeds - cost) / cost,
                     entry_progress)  # fmt: skip
     m = jj - base  # position in the moved path; -1 is the state right after our buy
     state = after if m < 0 else Curve(int(s_path[m]), int(t_path[m]))
@@ -456,10 +462,22 @@ def _summary(df: pl.DataFrame, by: list[str]) -> pl.DataFrame:
             mean=pl.col("net_return").mean(),
             median=pl.col("net_return").median(),
             sd=pl.col("net_return").std(),
-            grad=(pl.col("flag") == "graduated").mean(),
+            grad=pl.col("flag").str.starts_with("graduated").mean(),  # curve or pool
         )
-        .with_columns(half=1.959964 * pl.col("sd").fill_null(0) / pl.col("n").sqrt())
+        # no interval from one trade: its spread is unknown, not zero
+        .with_columns(
+            half=pl.when(pl.col("n") >= 2).then(1.959964 * pl.col("sd") / pl.col("n").sqrt())
+        )
     )
+
+
+def _ci(mean: float | None, half: float | None) -> str:
+    """Mean [95% interval], or the mean alone where the interval is unknown."""
+    if mean is None:
+        return "n/a"
+    if half is None:
+        return f"{_pct(mean)} [n/a]"
+    return f"{_pct(mean)} [{_pct(mean - half)} to {_pct(mean + half)}]"
 
 
 def _pct(x: float | None) -> str:
@@ -509,20 +527,19 @@ def report(df: pl.DataFrame, min_n: int = 200, delay_ms: int = 2_000) -> str:
         for r in joined.head(15).iter_rows(named=True):
             hold_cells = (
                 [f"{r['n_h']:,}", _pct(r["win_h"]),
-                 f"{_pct(r['mean_h'])} [{_pct(r['mean_h'] - r['half_h'])} to "
-                 f"{_pct(r['mean_h'] + r['half_h'])}]"]
+                 _ci(r["mean_h"], r["half_h"])]
                 if r["n_h"] is not None else ["0", "n/a", "n/a"]
             )  # fmt: skip
             lines.append(
                 f"| {r['entry']} | {r['exit']} | {r['n']:,} | {_pct(r['win'])} | "
-                f"{_pct(r['mean'])} [{_pct(r['mean'] - r['half'])} to "
-                f"{_pct(r['mean'] + r['half'])}] | "
+                + _ci(r["mean"], r["half"])
+                + " | "
                 + " | ".join(hold_cells)
                 + f" | {_pct(r['grad'])} |"
             )
         if joined.height:
             best = joined.row(0, named=True)
-            ok = best["n_h"] is not None and best["mean_h"] - best["half_h"] > 0
+            ok = best["half_h"] is not None and best["mean_h"] - best["half_h"] > 0
             lines += [
                 "",
                 f"Pre-set test: best discovery rule `{best['entry']} {best['exit']}` -> "
@@ -570,6 +587,19 @@ def pools_summary(root: Path = POOLS) -> str:
     )
 
 
+def graduation_note(df: pl.DataFrame) -> str:
+    """How these results value positions still open at graduation (it decides a lot)."""
+    flags = set(df["flag"].unique().to_list()) if "flag" in df.columns else set()
+    if flags & {"graduated_pool", "graduated_pool_open"}:
+        return (
+            "Positions still open at graduation are sold into the token's PumpSwap pool "
+            "(`--pool-fills`, pumpswap.py); where the swap data has no trade before the sale, "
+            "the pool's opening price is used and the trade is flagged "
+            "`graduated_pool_open` (optimistic)."
+        )
+    return "Positions still open at graduation are valued at the final curve price (optimistic)."
+
+
 def timing_report(df: pl.DataFrame, delay_ms: int) -> str:
     """Mean return by entry level and holding time, without and with fees."""
     s = _summary(df, ["entry", "exit", "venue"])
@@ -580,8 +610,7 @@ def timing_report(df: pl.DataFrame, delay_ms: int) -> str:
         "launch in the Slinky21 history; buy 0.25 SOL when curve progress first reaches "
         f"each level (token at most 60 minutes old), {delay_ms / 1000:g} s delay, hold a "
         "fixed time, sell. 'No fees' is the price move alone, our own price impact "
-        "included; 'direct' adds Pump.fun's 1.25% a side. Positions still open at "
-        "graduation are valued at the final curve price (optimistic).",
+        "included; 'direct' adds Pump.fun's 1.25% a side. " + graduation_note(df),
         "",
     ]
     exits = [x.name for x in TIMING_EXITS]
@@ -595,8 +624,7 @@ def timing_report(df: pl.DataFrame, delay_ms: int) -> str:
             for x in exits:
                 r = row.filter(pl.col("exit") == x)
                 if r.height:
-                    m, h = r["mean"][0], r["half"][0]
-                    cells.append(f"{_pct(m)} [{_pct(m - h)}, {_pct(m + h)}]")
+                    cells.append(_ci(r["mean"][0], r["half"][0]))
                 else:
                     cells.append("n/a")
             lines.append(f"| {e} | {row['n'].max():,} | " + " | ".join(cells) + " |")

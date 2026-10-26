@@ -41,6 +41,7 @@ from cryptobot.screen import (
     MINUTE,
     Exit,
     Params,
+    _ci,
     _classic_creates,
     _pct,
     _summary,
@@ -308,8 +309,7 @@ def report(df: pl.DataFrame, leaders: dict, delay_ms: int = 2_000) -> str:
         for r in s.sort("mean", descending=True).iter_rows(named=True):
             lines.append(
                 f"| {r['entry']} | {r['exit']} | {r['n']:,} | {_pct(r['win'])} | "
-                f"{_pct(r['mean'])} [{_pct(r['mean'] - r['half'])} to "
-                f"{_pct(r['mean'] + r['half'])}] | {_pct(r['median'])} | {_pct(r['grad'])} |"
+                f"{_ci(r['mean'], r['half'])} | {_pct(r['median'])} | {_pct(r['grad'])} |"
             )
         lines.append("")
     return "\n".join(lines)
@@ -374,8 +374,7 @@ def confluence_report(table: pl.DataFrame, entry: str, delay_ms: int) -> str:
     for r in table.iter_rows(named=True):
         lines.append(
             f"| {r['exit']} | {'yes' if r['led'] else 'no'} | {r['period']} | {r['n']:,} | "
-            f"{_pct(r['win'])} | {_pct(r['mean'])} [{_pct(r['mean'] - r['half'])} to "
-            f"{_pct(r['mean'] + r['half'])}] |"
+            f"{_pct(r['win'])} | {_ci(r['mean'], r['half'])} |"
         )
     return "\n".join([*lines, ""])
 

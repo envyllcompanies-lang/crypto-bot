@@ -23,10 +23,34 @@ SHOWN = 10
 EXTREMES = 5
 
 
-def load(root: Path = PAPER) -> tuple[pl.DataFrame | None, list[dict]]:
-    """All closed trades with their run name, and each run's summary."""
-    frames, runs = [], []
+def live_runs(root: Path = PAPER) -> list[Path]:
+    """Live paper runs only: a replay reproduces a live run's trades exactly, and a
+    backtest isn't live data, so counting either would double or mix the evidence."""
+    out = []
     for run in sorted(p for p in root.iterdir() if p.is_dir()) if root.exists() else []:
+        summary = run / "summary.json"
+        mode = json.loads(summary.read_text()).get("mode") if summary.exists() else None
+        if mode in (None, "live") and not run.name.endswith("-replay"):
+            out.append(run)
+    return out
+
+
+def shadow_variants(runs: list[Path]) -> set[str]:
+    """Variants marked shadow in any run's variants.json (no wallet limit: they measure
+    a rule on every qualifying token rather than one wallet's results)."""
+    out = set()
+    for run in runs:
+        path = run / "variants.json"
+        if path.exists():
+            out |= {v["name"] for v in json.loads(path.read_text()) if v.get("shadow")}
+    return out
+
+
+def load(root: Path = PAPER) -> tuple[pl.DataFrame | None, list[dict]]:
+    """All closed trades of the live runs with their run name, and each run's summary.
+    A trade recorded twice (same variant, token and entry decision) counts once."""
+    frames, runs = [], []
+    for run in live_runs(root):
         files = sorted((run / "trades").glob("*/*.parquet"))
         if files:
             frames.append(pl.scan_parquet(files).with_columns(run=pl.lit(run.name)).collect())
@@ -37,6 +61,14 @@ def load(root: Path = PAPER) -> tuple[pl.DataFrame | None, list[dict]]:
             hours = (b - a) / 3_600_000 if a is not None and b is not None else 0.0
             runs.append({"run": run.name, "hours": hours, "trades": s.get("closed_trades", 0)})
     trades = pl.concat(frames, how="diagonal_relaxed") if frames else None
+    if trades is not None:
+        if "entry_decided_ts_ms" in trades.columns:
+            trades = trades.unique(["variant", "mint", "entry_decided_ts_ms"], keep="first")
+        shadow = shadow_variants(live_runs(root))
+        trades = trades.with_columns(
+            shadow=pl.col("variant").is_in(list(shadow))
+            | pl.col("variant").str.starts_with("labels|")
+        )
     return trades, runs
 
 
@@ -50,17 +82,19 @@ def _stats(df: pl.DataFrame, by: list[str]) -> pl.DataFrame:
             sd=pl.col("net_return").std(),
             pnl=pl.col("pnl_lamports").sum(),
         )
-        .with_columns(half=Z95 * pl.col("sd").fill_null(0) / pl.col("n").sqrt())
+        # No interval from a single trade: its spread is unknown, not zero.
+        .with_columns(half=pl.when(pl.col("n") >= 2).then(Z95 * pl.col("sd") / pl.col("n").sqrt()))
     )
 
 
-def _row(label: str, n: int, wins: int, mean: float, half: float, pnl: int) -> str:
+def _row(label: str, n: int, wins: int, mean: float, half: float | None, pnl: int) -> str:
     lo, hi = wilson(wins, n)
+    interval = "n/a" if half is None else f"{_pct(mean - half)} to {_pct(mean + half)}"
     cells = [
         label,
         f"{n:,}",
         f"{_pct(wins / n)} [{_pct(lo)}-{_pct(hi)}]",
-        f"{_pct(mean)} [{_pct(mean - half)} to {_pct(mean + half)}]",
+        f"{_pct(mean)} [{interval}]",
         f"{pnl / 1e9:+.3f}",
     ]
     return "| " + " | ".join(cells) + " |"
@@ -85,11 +119,12 @@ def report(trades: pl.DataFrame | None, runs: list[dict]) -> list[str]:
     ]
     if trades is None or trades.is_empty():
         return [*lines, "", "No closed trades yet.", ""]
-    shadow = pl.col("variant").str.starts_with("labels|")
+    shadow = pl.col("shadow") if "shadow" in trades.columns else pl.lit(False)
     wallets, labels = trades.filter(~shadow), trades.filter(shadow)
     lines += [
-        f"- Closed trades: {wallets.height:,} by wallet variants, {labels.height:,} by the "
-        "shadow labels variants (every eligible token, no wallet limit)",
+        f"- Closed trades: {wallets.height:,} by wallet variants, {labels.height:,} by shadow "
+        "variants (labels, late-curve and quick-hold: every qualifying token, no wallet "
+        "limit). Replays are left out, so no trade is counted twice.",
         "",
         "## Strategy groups (wallet variants)",
         "",
@@ -102,7 +137,7 @@ def report(trades: pl.DataFrame | None, runs: list[dict]) -> list[str]:
         lines.append(_row(u, n, w, mean, half, pnl))
     ranked = _stats(wallets, ["variant"]).filter(pl.col("n") >= MIN_TRADES).sort("mean")
     positive = ranked.filter(pl.col("mean") > 0).height
-    proven = ranked.filter(pl.col("mean") - pl.col("half") > 0).height
+    proven = ranked.filter((pl.col("mean") - pl.col("half")).fill_null(-1) > 0).height
     lines += [
         "",
         f"## Variants with at least {MIN_TRADES} trades",
@@ -135,7 +170,7 @@ def report(trades: pl.DataFrame | None, runs: list[dict]) -> list[str]:
     if not labels.is_empty():
         lines += [
             "",
-            "## Base rate: every eligible token (shadow labels)",
+            "## Shadow variants (every qualifying token, no wallet limit)",
             "",
             *HEAD,
         ]

@@ -43,6 +43,20 @@ def latest_run(root: Path = PAPER) -> Path:
     return runs[-1]
 
 
+def clustered_half(values: pl.Series, clusters: pl.Series, z: float = Z95) -> float | None:
+    """Half-width of a 95% interval on the mean when observations come in clusters (one
+    token traded by several variants is one piece of evidence, not several): the
+    cluster-robust standard error with the usual G/(G-1) correction. None with fewer
+    than two observations or clusters, where the spread is unknown."""
+    n, g = values.len(), clusters.n_unique()
+    if n < 2 or g < 2:
+        return None
+    dev = pl.DataFrame({"c": clusters, "d": values - values.mean()})
+    sums = dev.group_by("c").agg(pl.col("d").sum())["d"]
+    var = float((sums**2).sum()) * g / (g - 1) / n**2
+    return z * var**0.5
+
+
 def wilson(wins: int, n: int, z: float = Z95) -> tuple[float, float]:
     """Wilson score interval for a win rate."""
     if n == 0:
