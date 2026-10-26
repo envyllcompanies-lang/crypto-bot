@@ -14,7 +14,7 @@ if systemctl is-active --quiet crypto-bot-backtest; then
 fi
 sudo systemctl reset-failed crypto-bot-backtest 2>/dev/null || true
 sudo systemd-run --unit=crypto-bot-backtest --uid="$(id -u)" --gid="$(id -g)" \
-  -p WorkingDirectory="$DIR" -p MemoryMax=450M -p Nice=15 \
+  -p WorkingDirectory="$DIR" -p MemoryMax=450M -p MemorySwapMax=0 -p Nice=15 \
   -p Environment="PYTHONUNBUFFERED=1 POLARS_MAX_THREADS=1 MALLOC_ARENA_MAX=2" \
   "$DIR/.venv/bin/python" -m cryptobot.backtest "$@"
 echo "started; follow it with: journalctl -u crypto-bot-backtest -f"

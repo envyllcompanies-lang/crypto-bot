@@ -9,4 +9,5 @@ EnvironmentFile=-@DIR@/.env
 ExecStart=/bin/bash @DIR@/deploy/snapshot.sh
 # Shares the 1 GB machine with the paper trader: capped and low priority.
 MemoryMax=350M
+MemorySwapMax=0
 Nice=15

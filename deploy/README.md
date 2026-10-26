@@ -43,11 +43,13 @@ Oracle's Always Free tier is permanent; only its $300 trial credit ends after 30
 sudo apt-get update -qq && sudo apt-get install -y -qq git curl ca-certificates && git clone -b claude/focused-pasteur-1utc3l https://github.com/envyllcompanies-lang/crypto-bot.git ~/crypto-bot && bash ~/crypto-bot/deploy/setup.sh
 ```
 
-This installs uv, Python 3.12 and the pinned packages, then runs the tests. It also starts two things:
+This installs uv, Python 3.12 and the pinned packages, then runs the tests. It also starts:
 
 - the paper trader, as a service that restarts after a crash or a reboot;
-- an update check every 15 minutes: new commits on GitHub are pulled and tested, and the trader restarts only if the tests pass;
-- a daily job at 00:10 UTC that rebuilds the tracked-wallet list from the last day of recordings (`data/reports/<date>-tracked.md`; set `CRYPTOBOT_TRACKED_DAYS` in `.env` for more days) and the creator records from the last 14 days (`data/reports/<date>-creators.md`; `CRYPTOBOT_CREATOR_DAYS`), builds the labelled-outcomes table (`data/reports/<date>-labels.md`), writes `data/reports/<date>-paper.md` and deletes raw events older than 14 days. It is capped at 450 MB of memory so it can't starve the trader; if either build hits the cap, the previous file stays in use.
+- the social collector (`crypto-bot-social`) and the X reader (`crypto-bot-x`, idle until you log in to X);
+- an update check every 15 minutes: new commits on GitHub are pulled and tested; if the tests pass, only the services whose code changed restart (a docs-only commit restarts nothing), and if a restarted service doesn't stay up, the update is rolled back and not tried again;
+- an hourly snapshot of the run;
+- a daily job at 00:10 UTC that rebuilds the tracked-wallet list from the last day of recordings (`data/reports/<date>-tracked.md`; set `CRYPTOBOT_TRACKED_DAYS` in `.env` for more days) and the creator records from the last 14 days (`data/reports/<date>-creators.md`; `CRYPTOBOT_CREATOR_DAYS`), builds the labelled-outcomes table (`data/reports/<date>-labels.md`), writes `data/reports/<date>-paper.md` and deletes raw events older than 14 days. It is capped at 450 MB of memory (no swap) so it can't starve the trader; if a build hits the cap, it is stopped and the previous file stays in use.
 
 ## Everyday commands (on the server)
 
@@ -56,9 +58,9 @@ This installs uv, Python 3.12 and the pinned packages, then runs the tests. It a
 | Is it running? | `systemctl status crypto-bot` |
 | Live log | `journalctl -u crypto-bot -f` |
 | Report so far | `cd ~/crypto-bot && ~/.local/bin/uv run python -m cryptobot.m6_report` |
-| Update now (it also updates itself every 15 minutes) | `bash ~/crypto-bot/deploy/setup.sh` |
+| Update now (it also updates itself every 15 minutes) | `bash ~/crypto-bot/deploy/update.sh` |
 | Update log | `journalctl -u crypto-bot-update` |
-| Stop / start | `sudo systemctl stop crypto-bot` / `sudo systemctl start crypto-bot` |
+| Stop / start (a stopped service stays stopped through updates) | `sudo systemctl stop crypto-bot` / `sudo systemctl start crypto-bot` |
 | Backtest the downloaded history (background, capped at 450 MB) | `bash ~/crypto-bot/deploy/backtest.sh` |
 | Follow the backtest | `journalctl -u crypto-bot-backtest -f` |
 | Backtest report | `cd ~/crypto-bot && .venv/bin/python -m cryptobot.m6_report data/backtest/<folder>` |
@@ -68,7 +70,7 @@ Social signals (`crypto-bot-social.service`, free public APIs, logged but not tr
 
 ```
 sudo systemctl status crypto-bot-social --no-pager
-.venv/bin/python -m cryptobot.social report
+cd ~/crypto-bot && .venv/bin/python -m cryptobot.social report
 ```
 
 ## Optional: reports pushed to GitHub
@@ -210,7 +212,7 @@ your main one. If X stops the account, the bot stops reading and logs why.
 The X service starts reading within 10 minutes. To check on it:
 
 ```
-.venv/bin/python -m cryptobot.xscrape status                # account, requests today, state
+cd ~/crypto-bot && .venv/bin/python -m cryptobot.xscrape status   # account, requests today, state
 sudo journalctl -u crypto-bot-x -n 20 --no-pager
 systemctl show -p MemoryPeak crypto-bot-x                    # should stay well under 160M
 ```
@@ -255,12 +257,14 @@ sudo journalctl -u crypto-bot-social -n 20 --no-pager    # "social sources with 
 
 - **Cost check:** the free tier covers the machine, a 30 GB standard disk and 1 GB a month of outbound traffic. The trader mostly downloads, and incoming traffic is free. Google's pricing for the server's public IPv4 address has changed over time, so look at the billing page after a day; the budget alert will also email you.
 - **Disk:** raw events take roughly 0.8 GB a day, and 14 days are kept. Change that with `CRYPTOBOT_KEEP_DAYS=N` in `~/crypto-bot/.env`. Trades, decisions and reports are kept.
-- **Restarts:** each restart starts a new run, and Final Stretch waits 40 minutes again.
+- **Restarts:** each restart of the paper trader starts a new run, and Final Stretch waits 40 minutes again. Updates restart it only when its own code changed.
 - **Narrative judge (optional, free):** the trader can ask a free LLM tier to rate each candidate token's narrative. Get a free key at https://console.groq.com/keys (Groq, used first) and/or https://aistudio.google.com/apikey (Gemini, the fallback), then type it in yourself on the server, replacing `...` with the key:
 
   ```bash
-  echo 'GROQ_API_KEY=...' >> ~/crypto-bot/.env && sudo systemctl restart crypto-bot
+  nano ~/crypto-bot/.env       # add a line GROQ_API_KEY=... , save with Ctrl+O, exit with Ctrl+X
+  sudo systemctl restart crypto-bot
   ```
 
-  For Gemini, use `GEMINI_API_KEY=...` the same way. The log line `narrative judge: groq` confirms it (`journalctl -u crypto-bot | grep narrative`); the key itself is never printed. Without a key the narrative is "not evaluated". Free tiers have daily limits; once one runs out, narratives are "not evaluated" until it resets.
+  (Use the editor, not `echo ... >> .env`: an `echo` with the key would be saved in your
+  shell history.) For Gemini, add `GEMINI_API_KEY=...` the same way. The log line `narrative judge: groq` confirms it (`journalctl -u crypto-bot | grep narrative`); the key itself is never printed. Without a key the narrative is "not evaluated". Free tiers have daily limits; once one runs out, narratives are "not evaluated" until it resets.
 - **Faster feed:** to use a faster data feed later, put `CRYPTOBOT_WS_URL=...` in `~/crypto-bot/.env` yourself and run `sudo systemctl restart crypto-bot`. The URL is never printed.

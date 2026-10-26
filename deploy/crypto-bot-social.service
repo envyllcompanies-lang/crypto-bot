@@ -15,6 +15,7 @@ RestartSec=30
 # out the paper trader on the 1 GB machine.
 MemoryHigh=120M
 MemoryMax=160M
+MemorySwapMax=0
 
 [Install]
 WantedBy=multi-user.target

@@ -17,6 +17,7 @@ RestartSec=60
 # About 60 MB when running; capped so it can never crowd out the paper trader.
 MemoryHigh=120M
 MemoryMax=160M
+MemorySwapMax=0
 
 [Install]
 WantedBy=multi-user.target

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Once a day (crypto-bot-daily.timer): write the paper-trading report, delete raw events
-# older than CRYPTOBOT_KEEP_DAYS (default 14), and, if CRYPTOBOT_PUSH_REPORTS=1 is in
-# .env, commit the report to the paper-results branch on GitHub with the deploy key.
+# Once a day (crypto-bot-daily.timer): delete raw data older than CRYPTOBOT_KEEP_DAYS
+# (default 14), rebuild the nightly lists, write the reports, and, if
+# CRYPTOBOT_PUSH_REPORTS=1 is in .env, commit the reports to the paper-results branch on
+# GitHub with the deploy key. Cleanup runs first, so a failing report can never leave the
+# disk to fill up, and each report that fails is skipped, not the rest of the night.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -9,44 +11,22 @@ cd "$DIR"
 PYTHON="$DIR/.venv/bin/python"
 KEEP_DAYS="${CRYPTOBOT_KEEP_DAYS:-14}"
 DAY="$(date -u +%Y-%m-%d)"
-
-mkdir -p data/reports
-# Rebuild the tracked-wallet list from recent recordings. The paper trader picks up the
-# new file within a minute. A failure keeps yesterday's list and the day goes on.
-TRACKED_REPORT="data/reports/$DAY-tracked.md"
-if ! nice -n 10 "$PYTHON" -m cryptobot.tracked --days "${CRYPTOBOT_TRACKED_DAYS:-1}" \
-    > "$TRACKED_REPORT"; then
-  echo "tracked wallets: build failed, keeping the previous list" >&2
-  rm -f "$TRACKED_REPORT"
+if ! [[ "$KEEP_DAYS" =~ ^[0-9]+$ ]]; then
+  echo "CRYPTOBOT_KEEP_DAYS must be a whole number of days, not '$KEEP_DAYS'; using 14" >&2
+  KEEP_DAYS=14
 fi
 
-# Rebuild creator records (launches and graduates per creator) the same way.
-CREATORS_REPORT="data/reports/$DAY-creators.md"
-if ! nice -n 10 "$PYTHON" -m cryptobot.creators --days "${CRYPTOBOT_CREATOR_DAYS:-14}" \
-    > "$CREATORS_REPORT"; then
-  echo "creator records: build failed, keeping the previous records" >&2
-  rm -f "$CREATORS_REPORT"
-fi
-
-# Labelled outcomes (every eligible token's features and result) for the adaptive layer.
-LABELS_REPORT="data/reports/$DAY-labels.md"
-if ! nice -n 10 "$PYTHON" -m cryptobot.labels > "$LABELS_REPORT"; then
-  echo "labels: no labelled outcomes yet" >&2
-  rm -f "$LABELS_REPORT"
-fi
-
-REPORT="data/reports/$DAY-paper.md"
-"$PYTHON" -m cryptobot.m6_report > "$REPORT"
-echo "report: $REPORT"
-
-# Raw events are needed only to replay a run. Layout: data/paper/<run>/events/<table>/<date>.
-find data/paper -mindepth 4 -maxdepth 4 -type d -path '*/events/*' -name '20??-??-??' \
-  -mtime +"$KEEP_DAYS" -exec rm -rf {} + 2>/dev/null || true
-
-# Social snapshots (social.py): data/live/social/<source>/<date>.
-find data/live/social -mindepth 2 -maxdepth 2 -type d -name '20??-??-??' \
-  -mtime +"$KEEP_DAYS" -exec rm -rf {} + 2>/dev/null || true
-
+# Cleanup. Raw events are needed only to replay a run: data/paper/<run>/events/<table>/
+# <date>; social snapshots: data/live/social/<source>/<date>; a standalone recorder's
+# tables: data/live/<table>/<date>.
+prune() {  # prune <root> <depth>: date folders older than KEEP_DAYS at that depth
+  [ -d "$1" ] || return 0
+  find "$1" -mindepth "$2" -maxdepth "$2" -type d -name '20??-??-??' -mtime +"$KEEP_DAYS" \
+    -exec rm -rf {} + || echo "cleanup of $1 failed" >&2
+}
+prune data/paper 4
+prune data/live/social 2
+prune data/live 2
 # Keep the watchlist and the X results short; watch.Watchlist notices the rewrite.
 for f in data/derived/watch.jsonl data/derived/x_scrape.jsonl; do
   if [ -f "$f" ]; then
@@ -55,8 +35,34 @@ for f in data/derived/watch.jsonl data/derived/x_scrape.jsonl; do
   fi
 done
 
-SOCIAL_REPORT="data/reports/$DAY-social.md"
-nice -n 10 "$PYTHON" -m cryptobot.social report > "$SOCIAL_REPORT" || rm -f "$SOCIAL_REPORT"
+mkdir -p data/reports
+REPORTS=()
+# report <file> <description> <command...>: run it into <file>; on failure, say so and
+# drop the file (the previous nightly list, if any, stays in use).
+report() {
+  local out="$1" what="$2"
+  shift 2
+  if nice -n 10 "$@" > "$out"; then
+    REPORTS+=("$out")
+  else
+    echo "$what: failed, skipped" >&2
+    rm -f "$out"
+  fi
+}
 
-bash "$DIR/deploy/push.sh" reports "Paper trading report $DAY" \
-  "$REPORT" "$TRACKED_REPORT" "$CREATORS_REPORT" "$LABELS_REPORT" "$SOCIAL_REPORT"
+# Tracked wallets and creator records first: the paper trader picks up new files within
+# a minute.
+report "data/reports/$DAY-tracked.md" "tracked wallets" \
+  "$PYTHON" -m cryptobot.tracked --days "${CRYPTOBOT_TRACKED_DAYS:-1}"
+report "data/reports/$DAY-creators.md" "creator records" \
+  "$PYTHON" -m cryptobot.creators --days "${CRYPTOBOT_CREATOR_DAYS:-14}"
+report "data/reports/$DAY-labels.md" "labels" "$PYTHON" -m cryptobot.labels
+report "data/reports/$DAY-paper.md" "paper report" "$PYTHON" -m cryptobot.m6_report
+report "data/reports/$DAY-review.md" "review" "$PYTHON" -m cryptobot.review
+report "data/reports/$DAY-preregistered.md" "pre-registered tests" \
+  "$PYTHON" -m cryptobot.prereg
+report "data/reports/$DAY-social.md" "social report" "$PYTHON" -m cryptobot.social report
+
+if [ "${#REPORTS[@]}" -gt 0 ]; then
+  bash "$DIR/deploy/push.sh" reports "Paper trading report $DAY" "${REPORTS[@]}"
+fi
