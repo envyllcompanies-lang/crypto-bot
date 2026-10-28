@@ -52,6 +52,14 @@ import or execute them.
   deleted once sliced). It keeps swaps of at least 0.01 SOL in pools that graduated, for
   70 minutes after graduation: about 1.6M swaps per 12 hours, 1.5 GB in all. `screen.py
   --pool-fills` sells positions open at graduation into these pools.
+- **Three days after graduation (`data/derived/migrated/`, 28 Oct 2026):** `uv run python
+  -m cryptobot.migrated extract` reads each `swap` file for 1 Sep-8 Oct straight from
+  Hugging Face (only the needed columns, never saved whole) and keeps one-minute bars of
+  each graduate pool's SOL reserve for its first 72 hours, from swaps of at least 0.01
+  SOL: close, low, high and swap count, with prices solved as in `pumpswap.pool_path`.
+  One `bars-<stamp>.parquet` per swap file plus `graduates.parquet`. The swap files have
+  holes (4-5 Sep missing, 6-7 Sep partial, and others the report lists);
+  `migrated.gaps` finds them and the backtest leaves out coins whose window crosses one.
 
 ## loopholetape/pumpfun-launches (launch level)
 
