@@ -61,3 +61,18 @@ That is 12 entries x 4 exit sets = 48 cells.
 - **If it passes:** the next step is a live test, which needs the recorder to capture
   PumpSwap trades (it doesn't yet). **If it fails:** recorded here; bottom bidding and
   conviction holds join the families that lost.
+
+## Amendment, 28 Oct 2026, before any result was looked at
+
+One run on the part of the data downloaded by then checked only that the code finished;
+none of its numbers were read.
+
+- **Holes in the swap files.** Some 12-hour files are missing and some hold only part of
+  their swaps: 4 Sep 22:00 to 5 Sep 16:00 holds none, and 6 Sep 14:00 to 7 Sep 16:00 holds
+  a small fraction of the usual count. A coin whose 72 hours cross a hole would look
+  untraded there and fill late. To keep the rule above ("its whole first 72 hours of
+  PumpSwap trading in the data"), an hour counts as in the data only if it holds at least
+  a quarter of the median hour's swaps across the graduate pools in their windows
+  (`migrated.gaps`). Coins whose 72 hours touch any other hour are left out. The report
+  lists the holes and how many coins they remove.
+- **Trailing stop.** "Its highest close since entry" includes the entry bar's close.
