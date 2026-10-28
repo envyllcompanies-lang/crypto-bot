@@ -160,15 +160,54 @@ V3 is a different creator's beginner guide, not a rule set. What bears on the st
 | C6 | His position sizes are right and under 0.1 SOL fees win | Break-even win rate at 0.05-1.5 SOL trade sizes with fixed network costs |
 | C7 | Tokens with many tracked wallets do worse | Needs a proxy list of known active or profitable wallets built from the data |
 
+## V4: narrative scalps, bottom bids after migration, conviction holds
+
+V4 (pasted 28 Oct 2026) is another creator's video advertising a paid group. He claims
+about $100K in a month, "all on chain, you can check every trade yourself", but names no
+wallet in the transcript, and shows three winning trades. His three strategies:
+
+- **Narrative scalps.** A story breaks on X (he watches a feed of big accounts' posts,
+  "if Elon says something funny, that gets tokenized"), a coin launches on it in New
+  Pairs, and he is in and out within minutes, out at about 2-3x ("23x" in the
+  transcript, almost certainly "2-3x"). Most such coins are back to zero within the
+  hour.
+- **Bottom bidding good narratives.** He waits until a coin has graduated and dumped,
+  lets the early buyers take profit, and buys the bottom once it starts to reverse,
+  adding on dips. Example: SWolf, the mascot coin of the STRK altcoin while STRK rose
+  300%; bought around $100K market cap after migration, average exit around $500K
+  (about 5x). Before buying: largest holder under 4% (he aims for 3.5%), and a second
+  figure ("DRO" in the transcript) at 20-28%, under 30%.
+- **Conviction holds.** He holds for days a coin whose story he expects to keep growing,
+  buys more as it falls (PUMPKIN: from $1M back to $200K, he added) and takes profit on
+  the way up. Example: in around $150K, average exit about $1.3-1.56M, peak $4M; he says
+  he gave back about $80K of $120K in open profit. His rule: hold only if he can say in
+  one sentence why more people will care tomorrow.
+- **Risk rules:** decide the exit before buying, never put the whole account in one coin,
+  stop after losses (no revenge trading), journal every trade, learn one strategy at a
+  time.
+
+**Conflicts with V1.** V1 sells everything at the first price below entry; V4 adds to a
+position through an 80% fall. V1 skips migrated coins; two of V4's three strategies
+trade only after migration.
+
+| ID | Claim | Test |
+|---|---|---|
+| C12 | Coins launched on breaking X news can be scalped for 2-3x within minutes | History: `attention.py` (coins named after a trending Wikipedia topic, launch-day news proxy) lost on curve entries. Live: X mentions per coin are logged once `xscrape` is logged in |
+| C13 | After migration, buying the reversal from the post-graduation low pays (about 5x on his example) | CLAUDE.md S5 (migrated range). Needs PumpSwap trades for hours to days after graduation; `pumpswap.py` kept only the first 70 minutes |
+| C14 | Multi-day holds with profit taken on the way up beat scalps | Needs days of PumpSwap trades per pool, and an exact rule for "conviction" |
+| C15 | Largest holder under 4% avoids the dumps that wipe out a buyer | Already a stage-one filter; tested on the curve, not yet after migration |
+
 ## Claims that can't be tested
 
 - "Months where I do not lose, not even in a single day."
 - "$50 into $500K", "0.1 SOL into 100 SOL", "8 months straight with this exact same strategy".
 - "Works 100% of the time" and "every single time". C1 tests this directly.
 - V3's "$30 into $100,000" examples: real on chain but picked from millions of wallets, so they show the tail exists, not how often it comes.
+- V4's "$100K last month" and its three example trades: no wallet is named, and three winners chosen after the fact say nothing about how often the method wins.
 
 ## Conflicts of interest and risks
 
+- **Paid group:** V4 sells a membership ("the first 50 people get the current price, then it doubles"), a scarcity pitch, and links exchanges and trading apps in its description.
 - **Referral income:** V3 promotes the FOMO app with a sign-up link in its description.
 - **Referral income:** V2's Terminal link uses his referral code. He earns from viewers' trading volume whether they win or lose.
 - **Platform change:** V1 uses Axiom and V2 uses Terminal. Filter names like "insiders" and "pro traders" are each platform's own and may not mean the same thing on both.
