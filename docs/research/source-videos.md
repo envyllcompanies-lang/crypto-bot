@@ -193,8 +193,8 @@ trade only after migration.
 | ID | Claim | Test |
 |---|---|---|
 | C12 | Coins launched on breaking X news can be scalped for 2-3x within minutes | History: `attention.py` (coins named after a trending Wikipedia topic, launch-day news proxy) lost on curve entries. Live: X mentions per coin are logged once `xscrape` is logged in |
-| C13 | After migration, buying the reversal from the post-graduation low pays (about 5x on his example) | CLAUDE.md S5 (migrated range). Needs PumpSwap trades for hours to days after graduation; `pumpswap.py` kept only the first 70 minutes |
-| C14 | Multi-day holds with profit taken on the way up beat scalps | Needs days of PumpSwap trades per pool, and an exact rule for "conviction" |
+| C13 | After migration, buying the reversal from the post-graduation low pays (about 5x on his example) | **Failed** on 1 Sep-8 Oct graduates (`reports/2026-10-29-after-graduation.md`, pre-registered): every bottom-bid cell lost money in discovery and holdout, best holdout -12.6% per trade. His narrative and holder checks couldn't be applied |
+| C14 | Multi-day holds with profit taken on the way up beat scalps | **Failed** in the same test: thirds sold at 2x and 4x, the rest on a 60% trailing stop or at 72 hours, with and without averaging down; every cell lost money in both periods |
 | C15 | Largest holder under 4% avoids the dumps that wipe out a buyer | Already a stage-one filter; tested on the curve, not yet after migration |
 
 ## Claims that can't be tested

@@ -180,3 +180,16 @@ def test_hours_the_files_miss_are_found_and_their_coins_left_out():
     assert migrated.gap_spans(migrated.gaps(b, grads))[0][1].endswith("11:00")
     t = migrated.prepare(b, grads, grads.select("mint"), migrated.gaps(b, grads))
     assert t["pid"].unique().to_list() == [1]
+
+
+def test_a_wick_inside_a_minute_stops_the_trade_unless_only_closes_count():
+    t = toy({
+        0: [(0, 1.0), (10, 4.0), (60, 0.8), (70, 1.1), (71, 1.2), (90, 1.2, 0.5, 1.2),
+            (91, 1.2), (END, 3.0)],
+    })  # fmt: skip
+    assert migrated.wicks(t) == (1 / 6, 0.0)  # bar 90 of the six with two neighbours
+    hit = migrated.bottom_bid(migrated.entries(t, 0.7, 0.3, 30, 1440), target=2.0)
+    assert hit["reason"].item() == "stop"
+    c = migrated.closes_only(t)
+    held = migrated.bottom_bid(migrated.entries(c, 0.7, 0.3, 30, 1440), target=2.0)
+    assert held["reason"].item() == "target" and held["out_m"].item() == END

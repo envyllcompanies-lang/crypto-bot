@@ -76,3 +76,11 @@ none of its numbers were read.
   (`migrated.gaps`). Coins whose 72 hours touch any other hour are left out. The report
   lists the holes and how many coins they remove.
 - **Trailing stop.** "Its highest close since entry" includes the entry bar's close.
+
+## Result, 29 Oct 2026
+
+**Fail.** `reports/2026-10-29-after-graduation.md`. The best discovery cell
+(`drop60|rise30|1-3h`, 2x target) lost 12.6% per trade on the holdout [-16.0% to
+-9.1%], n 1,563. None of the 48 cells had a positive mean in either period, nor did any
+of them when rerun on closes only. Bottom bidding and conviction holds after graduation
+join the families that lost. No live test follows from this.

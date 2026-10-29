@@ -28,6 +28,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 
 from cryptobot import pumpswap
@@ -474,6 +475,51 @@ def base_rate(b: pl.DataFrame) -> pl.DataFrame:
     return x.select("pid", "period", net_return=pl.col("out_lamports") / STAKE - 1)
 
 
+def closes_only(t: pl.DataFrame) -> pl.DataFrame:
+    """The same bars with each bar's low and high set to its close, and the running high
+    and low rebuilt: a check that wicks inside a minute (or a badly solved swap) don't
+    decide the result."""
+    return (
+        t.with_columns(lp=pl.col("cp"), hp=pl.col("cp"))
+        .with_columns(peak=pl.col("hp").cum_max().over("pid"))
+        .with_columns(seg=(pl.col("hp") >= pl.col("peak")).cast(pl.Int32).cum_sum().over("pid"))
+        .with_columns(trough=pl.col("lp").cum_min().over("pid", "seg"))
+        .drop("seg")
+    )
+
+
+def wicks(t: pl.DataFrame) -> tuple[float, float]:
+    """Share of bars whose low is under half the lowest of its own and its neighbours'
+    closes, and whose high is over twice the highest."""
+    x = t.with_columns(
+        pc=pl.col("cp").shift(1).over("pid"), nc=pl.col("cp").shift(-1).over("pid")
+    ).drop_nulls(["pc", "nc"])
+    lo = (x["lp"] < 0.5 * x.select(pl.min_horizontal("pc", "nc", "cp")).to_series()).mean()
+    hi = (x["hp"] > 2.0 * x.select(pl.max_horizontal("pc", "nc", "cp")).to_series()).mean()
+    return float(lo), float(hi)
+
+
+def cross_check(b: pl.DataFrame, grads: pl.DataFrame, n: int = 300) -> tuple[int, float] | None:
+    """Bar closes against pumpswap.pool_path on the first 65 minutes of `n` random pools
+    (pumpswap.py's slices, where present): bars compared and the share off by over 1%."""
+    if not any(pumpswap.OUT.glob("swaps-*.parquet")):
+        return None
+    pick = grads.join(b.select("pid").unique(), on="pid").sample(min(n, grads.height), seed=1)
+    paths = pumpswap.load(pick["mint"].to_list())
+    off = total = 0
+    for pid, mint, grad_ms in pick.select("pid", "mint", "grad_ms").iter_rows():
+        _, _, ts, sol, _ = paths[mint]
+        if len(ts) == 0:
+            continue
+        mine = b.filter((pl.col("pid") == pid) & (pl.col("minute") < 65))
+        for minute, close in mine.select("minute", "close").iter_rows():
+            i = int(np.searchsorted(ts, grad_ms + (minute + 1) * MINUTE_MS, side="left"))
+            if i:
+                total += 1
+                off += abs(close / sol[i - 1] - 1) > 0.01
+    return total, off / total if total else 0.0
+
+
 def summary(df: pl.DataFrame, by: list[str]) -> pl.DataFrame:
     z = 1.959964
     return df.group_by(by).agg(
@@ -576,6 +622,27 @@ def report(b: pl.DataFrame, grads: pl.DataFrame) -> str:
         "",
         f"Cells positive on discovery: {pos.height} of {joined.height}; of those, "
         f"positive on the holdout too: {both.height}.",
+        "",
+        "## Checks (not part of the pre-registered rule)",
+        "",
+    ]
+    check = cross_check(b, grads)
+    if check is not None:
+        lines.append(
+            f"- **Bars against `pumpswap.pool_path`:** {check[0]:,} one-minute closes in the "
+            f"first 65 minutes of 300 random pools; {_pct(check[1])} differ by over 1%."
+        )
+    lo, hi = wicks(t)
+    c = summary(cells(closes_only(t)), ["entry", "exit", "period"])
+    best = c.group_by("period").agg(pl.col("mean").max()).sort("period")
+    n_pos = c.filter(pl.col("mean") > 0).height
+    lines += [
+        f"- **Wicks:** {lo:.3%} of the test coins' bars have a low under half the lowest "
+        f"nearby close, {hi:.3%} a high over twice the highest. Stops, targets and the "
+        "high and low the entry measures use those, so every cell was rerun on closes only: "
+        "best mean "
+        + ", ".join(f"{p} {_pct(v)}" for p, v in best.rows())
+        + f"; cells with a positive mean in either period: {n_pos} of {c.height}.",
         "",
     ]
     return "\n".join(lines)
