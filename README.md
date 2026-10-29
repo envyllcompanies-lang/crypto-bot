@@ -1,1 +1,121 @@
 # crypto-bot
+
+A paper trader and backtester for a Pump.fun dip-buying strategy ("V1") taken from YouTube videos. It never trades real money: nothing in this repo builds, signs or sends a transaction, and it reads no keys. Going live with real money happens only if the owner says so.
+
+## Status
+
+| Milestone | State | Result |
+|---|---|---|
+| M0 Scaffold | Done | `reports/2026-10-10-m0-curve-and-breakeven.md` |
+| M1 Data | Done | `reports/2026-10-10-m1-data-quality.md` |
+| M2 Replay engine | Done | `tests/test_replay.py` |
+| M5 Live recorder | Done | `reports/2026-10-10-m5-recorder.md` |
+| M6 Paper trader | Built; first live session run | `reports/2026-10-10-m6-paper.md` |
+| M3 Backtest (cut down) | Next | |
+| M4 Filter study | Later | |
+
+Live testing comes first (owner's call, 10 Oct 2026): M5 and M6, then a cut-down M3, then M4.
+
+## Run it
+
+Needs [uv](https://docs.astral.sh/uv/). Everything uses free data and the free public Solana RPC.
+
+```bash
+uv sync
+uv run pytest
+uv run python -m cryptobot.paper live --minutes 60
+uv run python -m cryptobot.m6_report
+```
+
+| Command | What it does |
+|---|---|
+| `uv run python -m cryptobot.paper live [--minutes N]` | Streams Pump.fun live, paper trades every variant, saves the raw events with the run. Ctrl-C stops it cleanly. |
+| `uv run python -m cryptobot.paper replay --events DIR` | Runs the same engine over recorded events (a run's `events/` folder or `data/live`). A live session replays to identical trades. |
+| `uv run python -m cryptobot.m6_report [RUN_DIR]` | Report for a paper run (default: the latest) or a backtest folder. |
+| `uv run python -m cryptobot.backtest [--from DAY] [--to DAY]` | M3 backtest: the same engine and variants over Slinky21's downloaded history (`slinky.py` streams it an hour at a time, in chain order). No lookups exist for the past, so V1's holder and X checks are skipped and conviction runs offline. Writes `data/backtest/<time>/`. |
+| `uv run python -m cryptobot.review` | Every closed paper trade from every run, pooled: strategy groups, best and worst variants with 95% intervals, how trades ended, the base rate, biggest wins and losses. Light enough to run on the server. |
+| `uv run python -m cryptobot.labels` | Labelled outcomes from every paper and backtest run (training data for the learned scorer). |
+| `uv run python -m cryptobot.recorder [--minutes N]` | Records events only, into `data/live`. |
+| `uv run python -m cryptobot.m5_report` | Checks the recorded events against the curve formula. |
+| `uv run python -m cryptobot.m1_report` | Data-quality report for the free datasets (downloads what it needs). |
+
+Final Stretch entries start 40 minutes into a run (see below), so run the paper trader for an hour or more.
+
+**24/7 for free:** `deploy/README.md` sets it up on Google Cloud's free-tier e2-micro server (us-east1). One command installs it as a service that restarts itself and writes a report every day.
+
+## How the paper trader works
+
+- **Data.** It subscribes to the Pump.fun program's logs on `api.mainnet-beta.solana.com` and decodes launch and trade events with the official IDL. A keyed RPC can be used by putting `CRYPTOBOT_WS_URL` in `.env`; the URL is never printed.
+- **Tokens.** Only classic launches (quoted in SOL, not Mayhem) whose launch it saw. For each it tracks the curve, every wallet's balance, the dev's share, launch-block buyers ("insiders"), a "pro trader" proxy (wallets that bought at least 0.5 SOL) and whether the launch ran up with no sells (V1's bundle sign).
+- **Rules.** V1's baseline from `docs/research/source-videos.md`:
+  - New Pairs at $7K or more.
+  - Final Stretch tokens up to 40 minutes old with dev ≤5%, insiders ≤20%, pro traders ≥10 and $8K or more, ranked by market cap, skipping the top two and keeping the bottom four.
+  - Dollar levels are converted at the SOL price V1 implies (launch at $4.5K). Final Stretch's curve threshold isn't stated, so 50%, 75% and 87% each run as their own universe.
+  - The column ranking needs every token up to 40 minutes old, so Final Stretch takes no entries in a run's first 40 minutes.
+  - Once a token passes every other rule, the trader looks up V1's last checks, free, once per token, and entries wait for the answer:
+    - whether its X link is a community (from the token's own metadata file; no X scraping);
+    - whether the top-5 holders' SOL balances look alike (several small wallets under 1 SOL);
+    - whether their funding is clustered (3 or more share a funder, or were created in the last hour).
+- **Variants.** Each universe runs every combination of these side by side, each variant with its own 1 SOL paper wallet:
+  - entry: no dip, or a drop of 25%, 40% or 50% from the high;
+  - target: +45%, +50% or +100%;
+  - stop: the first price below entry (V1's rule) or -20%;
+  - all at a 2-second delay.
+
+  V1's core rule (40% dip, +45%, exit at entry) also runs at 1 s and 5 s delays, with a 10-minute stall exit, and with a largest-holder-sells exit.
+- **Narrative judge** (`narrative.py`). After the holder lookup is delivered, a separate queue sends the token's name, symbol, description and links (plus the text of a linked tweet, from X's free oEmbed endpoint) to a free LLM tier, which rates the narrative 1-5 and lists red flags (copycat, low effort, scam signs, offensive, no story, impersonation):
+  - Groq first (`GROQ_API_KEY`), Gemini as the fallback (`GEMINI_API_KEY`). Both have free tiers.
+  - Keys go in `~/crypto-bot/.env` on the server, typed in by the owner (see `deploy/README.md`). They are never printed or logged.
+  - Its verdict arrives as a later lookup row and is logged next to the token's conviction as a "shadow" field. It adds no points. The `conviction` universe ignores it and never waits for it. The `conviction_narrative` universe waits for it and caps the tier with it: 1-2 never buy, 3 at most average, 4 at most good, only 5 can be very high (an empty verdict allows at most average). Running both side by side shows whether the gate earns its delay; the report's "Conviction by narrative score" table shows whether higher scores win more.
+  - With no key, or when a call fails or a free quota runs out, the narrative is "not evaluated".
+  - Token text is written by its creator, so it is sent as truncated, clearly marked data, and only an answer in a strict JSON shape is accepted.
+- **Copycats.** A launch whose name or symbol (ignoring case and spaces) was used by another launch in the previous 24 hours is flagged a copycat.
+- **Creator records** (`creators.py`). A nightly job counts, for every creator seen in the last 14 days of recordings, their launches and how many graduated. The trader reloads the file within a minute and adds launches it sees during the run.
+- **Conviction layer** (`conviction.py`, our proposal on top of V1). Each young token gets a 0-100 score from structural signals with published evidence: not a copycat (20), creator record (+15 for an earlier graduate, -10 for another launch in the last 7 days), the share held by the first 10 buyers (12), trades needed per point of curve progress (8), dev and insider shares (8 each), top-5 balances not alike (8), no bundle launch candle (6), pro traders (6) and X link type (up to 4), minus 10 for a copycat. The parts add up to 95 at most:
+  - 80 or more: very high, buy at once;
+  - 65-80: good, buy a 25% dip from the high;
+  - 50-65: average, buy a 40% dip;
+  - below 50: skip.
+
+  Some tokens are never traded: tainted data, graduated, older than 40 minutes, clustered top-5 funding, or no lookup yet. The "conviction" universe takes New Pairs-sized tokens ($7K or more, up to 40 minutes old, 0.25 SOL stakes) and runs every target and stop above at a 2-second delay. The weights are first guesses to tune on paper results.
+- **Luck test and labels** (the start of the adaptive layer).
+  - `control_random` passes the same gates as conviction, then a fixed coin flip on each mint picks half the tokens, bought on a 25% dip. If conviction's picks don't beat it, the score shows no skill.
+  - `labels` is a set of shadow variants, not wallets: they buy every eligible token the moment it qualifies (clustered funding included, so that filter can be measured), with V1's +45% exit and two scalps (+5% and +10%, -10% stop). A nightly job (`labels.py`) joins each outcome to the token's features at decision time: holder checks, X link type, Telegram and website links, the narrative verdict (score, theme, red flags), creator record and tracked wallets.
+  - Its report (`data/reports/<date>-labels.md`) breaks profit down by exit, by the stage-one filters stacked one on another, by each thesis signal, by narrative score, by a combined "legit thesis" rule (X community, narrative 4-5 with no red flags, original, clean top-5 holders) and by age at entry, each with a 95% interval and both halves of the period. It is training and test data for the learned scorer.
+  - The report's "Picks vs chance" table compares conviction, the narrative gate, the control and the base rate with the same exits.
+- **Fills.** The M2 fill model:
+  - An order lands after the delay, behind every trade that arrived first.
+  - It fills on the curve those trades left, with our own price impact.
+  - Stops fill at whatever price is there when the sell lands, not at the stop level.
+  - Fees are charged as through Terminal with a referral code, and token-account rent is refunded.
+
+  A test proves the paper engine gives the same trades as the M2 replay engine.
+- **Tracked wallets.** V1's "few tracked wallets" check uses a list built nightly from the server's own recorded trades (`tracked.py`). It keeps wallets that made money across several tokens after fees, drops bots, snipers and token creators, and tests the list on later data it wasn't built from. A candidate passes with at most 2 listed holders. Until the first list is built, the check is "not evaluated". A lookup that fails is also recorded as "not evaluated" for that token.
+- **Wallets.** Each variant starts with its own 1 SOL paper wallet. The report shows each wallet's cash, the value of its open positions (sold into the current curve after fees) and the two together (equity).
+- **Report.** It opens with "V1 as stated" (V1's core rule in each universe, and the conviction variants), then conviction results by tier, and a spot-check list of the last 25 entries with each token's mint, name, X link, conviction and narrative, to check by hand in Axiom or Padre. Then feed lag and lookup delay (how long entries waited for the holder lookup, and how long the narrative verdict took). The full grid follows under "Experiments".
+- **Output.** `data/paper/<run>/` holds `decisions`, `trades` and `gates` as Parquet, plus `variants.json`, `summary.json` and the raw `events/`. See `data/README.md`.
+
+## Trade size
+
+The starting wallet is 1 SOL:
+- 0.25 SOL per New Pairs trade;
+- 0.4 SOL per Final Stretch trade.
+
+Stakes can grow with the wallet, but:
+- no single trade is ever more than 1 SOL;
+- 1 SOL stakes are used only once the wallet passes a threshold the owner sets;
+- the cap may rise to 1.5 SOL later, never higher. The code refuses anything above 1.5 SOL.
+
+## Layout
+
+- `src/cryptobot/`
+  - **Model:** `curve.py` (bonding curve), `costs.py` (fees, rent, break-even).
+  - **Engines:** `replay.py` (M2 replay engine), `strategies.py` (dip buyer), `paper.py` (M6 engine, live and replay), `features.py` (per-token live state), `v1.py` (V1 rules and variant grid), `holders.py` (holder and X-link lookups), `narrative.py` (LLM narrative judge), `conviction.py` (conviction score).
+  - **Data:** `events.py` (event decoding), `recorder.py` (live stream to Parquet), `fetch.py` (Hugging Face downloads), `validate.py` and `chain.py` (data checks).
+  - **Reports:** `m0_report.py`, `m1_report.py`, `m5_report.py`, `m6_report.py`.
+- `tests/`: pytest suite.
+- `reports/`: dated results, each generated by code.
+- `docs/research/source-videos.md`: every rule from the source videos and the claims under test.
+- `deploy/`: 24/7 server setup (Google Cloud free tier).
+- `data/README.md`: every dataset, where it comes from and how to get it. Data files themselves aren't committed.
+- `CLAUDE.md`: ground rules, facts, hypotheses and milestones.

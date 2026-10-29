@@ -1,0 +1,14 @@
+[Unit]
+Description=crypto-bot daily paper report, raw-event cleanup and optional push
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@DIR@
+EnvironmentFile=-@DIR@/.env
+ExecStart=/bin/bash @DIR@/deploy/daily.sh
+# The paper trader shares this 1 GB machine: cap the nightly job so it can never
+# starve it. If the tracked-wallet build hits the cap, only that step fails.
+MemoryMax=450M
+MemorySwapMax=0
+Nice=10

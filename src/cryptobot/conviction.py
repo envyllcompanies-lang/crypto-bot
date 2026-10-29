@@ -1,0 +1,293 @@
+"""Conviction: a 0-100 score for how much a token deserves an entry, and how early (M6).
+
+The owner wants the bot to be selective: enter strong coins at once and weaker ones only
+on a dip. This module turns what the engine already knows about a token (features.py)
+and its once-per-token lookup (holders.py, with the LLM narrative from narrative.py)
+into a score, a tier and the entry drop that tier asks for.
+
+Every constant here is a first proposal, to be tuned on paper results, not a finding.
+The score is computed only from the token's state and the lookup row recorded before the
+event being decided, so live runs and replays give the same scores.
+
+Hard blocks (no score, never trade): data tainted, graduated, older than 40 minutes,
+no usable lookup yet (not done, or it failed), or top-5 funding clustered. Mayhem and
+non-SOL curves are never tracked at all.
+
+Points (summed, clamped to 0-100; the parts add up to 95 at most). The weights follow
+the research report (reports/Pumpfun narratives and bot latency.md): structural signals
+with published evidence weigh most, and the LLM narrative is logged but not scored.
+
+- not a copycat: 20. Originals graduate 9.20% of the time against 0.86% for copycats
+  (arXiv 2609.10246, 15.2M coins); a copycat also takes the red-flag penalty;
+- creator record (creators.py): 15 if an earlier launch of theirs graduated; -10 if they
+  launched another token in the previous 7 days (serial launcher); 0 if unknown;
+- early buyers: 12 if the first 10 buyers (dev excluded) hold at most 15% of supply,
+  falling linearly to 0 at 40% (they hold far more in high-risk tokens, MELT);
+- climb efficiency: 8 at 5 or fewer trades per percentage point of curve progress,
+  falling to 0 at 25 (graduates take fewer trades, arXiv 2602.14860);
+- dev share: 8 up to 5%, falling linearly to 0 at 15%;
+- insider share: 8 up to 20%, falling linearly to 0 at 40%;
+- top-5 SOL balances not alike: 8;
+- no bundle launch candle: 6;
+- pro traders: 6 at 10 or more, pro rata below;
+- X link: community 4, tweet 1, profile or none 0, not evaluated 1 (no outcome data);
+- minus 10 per red flag (copycat).
+
+The LLM narrative score and its red flags are recorded as "shadow" fields and change
+nothing: no published evidence shows narrative themes predict outcomes, and the score
+must first beat the on-chain features on later, held-out data (M4).
+
+Thresholds inside each component are first proposals, to be tuned on recorded data.
+
+Tiers: 80+ very_high, buy now (drop 0); 65-80 good, buy a 25% drop from the high;
+50-65 average, buy a 40% drop; below 50 skip. Tiers apply to the score rounded to a
+whole number, the one logs and reports show.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass, field, replace
+
+from cryptobot.features import TokenState
+from cryptobot.holders import balances_alike, funding_clustered
+
+MAX_AGE_MS = 40 * 60 * 1000
+# Backtests on historical data have no holder lookup (top-5 balances, funders, metadata).
+# This stands in for it: the funding block is skipped, the holder check scores half its
+# points and the X link scores as not evaluated. Live runs never use it.
+OFFLINE: dict = {"offline": True}
+
+NOT_COPYCAT = 20
+CREATOR_GRADUATE, CREATOR_SERIAL = 15, -10
+EARLY_POINTS, EARLY_FULL, EARLY_ZERO = 12, 0.15, 0.40
+CLIMB_POINTS, CLIMB_FULL, CLIMB_ZERO = 8, 5.0, 25.0
+DEV_POINTS, DEV_FULL, DEV_ZERO = 8, 0.05, 0.15
+INSIDER_POINTS, INSIDER_FULL, INSIDER_ZERO = 8, 0.20, 0.40
+HOLDERS_DIFFER = 8
+NO_BUNDLE_CANDLE = 6
+PRO_POINTS, PRO_FULL = 6, 10
+X_POINTS = {"community": 4, "tweet": 1, "profile": 0, "none": 0, None: 1}
+RED_FLAG_PENALTY = 10
+
+# (minimum score, tier, drop from the all-time high to buy at), best first.
+TIERS = ((80, "very_high", 0.0), (65, "good", 0.25), (50, "average", 0.40))
+SKIP = "skip"
+WAITING = "waiting_narrative"  # narrative-gated universe: no verdict yet, so no entry
+
+# Narrative gate (the owner's rule, run beside the ungated universe to test it): the
+# highest tier each LLM narrative score allows. 1-2 never buy, 3 at most average, 4 at
+# most good, only 5 can be very high. A verdict that came back empty (judge error or
+# quota spent) allows at most average.
+NARRATIVE_CAPS = {1: SKIP, 2: SKIP, 3: "average", 4: "good", 5: "very_high"}
+NOT_JUDGED_CAP = "average"
+_RANK = {SKIP: 0, "average": 1, "good": 2, "very_high": 3}
+_DROPS = {name: drop for _, name, drop in TIERS}
+
+
+@dataclass(frozen=True)
+class Conviction:
+    score: int
+    tier: str  # very_high, good, average or skip
+    drop: float | None  # entry drop for the tier; None = skip
+    reasons: dict[str, float] = field(default_factory=dict)  # points per component
+    red_flags: tuple[str, ...] = ()
+    shadow: dict = field(default_factory=dict)  # logged, never scored (the LLM narrative)
+    narrative_cap: str | None = None  # narrative-gated universe only: the tier cap applied
+    misses: tuple[str, ...] = ()  # elite universes only: the parts of the rule that failed
+
+    def describe(self) -> dict:
+        return {
+            "score": self.score,
+            "tier": self.tier,
+            "drop": self.drop,
+            "reasons": self.reasons,
+            "red_flags": list(self.red_flags),
+            "shadow": self.shadow,
+            "narrative_cap": self.narrative_cap,
+            "misses": list(self.misses),
+        }
+
+
+def _linear(value: float, full: float, zero: float, points: float) -> float:
+    """`points` at or below `full`, 0 at or above `zero`, a straight line between."""
+    if value <= full:
+        return points
+    if value >= zero:
+        return 0.0
+    return points * (zero - value) / (zero - full)
+
+
+def blocks(
+    tok: TokenState,
+    result: dict | None,
+    lookup_ms: int | None,
+    now_ms: int,
+    measure_only: bool = False,
+) -> list[str]:
+    """Reasons the token may never be traded on conviction; empty if none.
+
+    `measure_only` (the labels universe) keeps the funding check out: labels must see
+    clustered tokens too, or nobody can measure whether that filter helps."""
+    out = []
+    if tok.tainted:
+        out.append("tainted")
+    if tok.curve.graduated:
+        out.append("graduated")
+    if tok.age_ms(now_ms) > MAX_AGE_MS:
+        out.append("older_than_40m")
+    if result is None or lookup_ms is None:
+        out.append("no_lookup")
+    elif (
+        not measure_only
+        and not result.get("offline")
+        and funding_clustered(result["funders"], result["first_ms"], lookup_ms)
+    ):
+        out.append("funding_clustered")
+    return out
+
+
+def conviction(
+    tok: TokenState,
+    result: dict | None,
+    lookup_ms: int | None,
+    now_ms: int,
+    measure_only: bool = False,
+) -> Conviction | None:
+    """The token's conviction now, or None if a hard block applies.
+
+    `result` is the lookup's parsed result (None if not done or failed) and `lookup_ms`
+    the time it arrived, which is when its funding times were judged fresh or not.
+    """
+    if blocks(tok, result, lookup_ms, now_ms, measure_only):
+        return None
+    assert result is not None
+    flags = {"copycat"} if tok.copycat else set()
+    creator = 0.0
+    if tok.creator_graduates:
+        creator += CREATOR_GRADUATE
+    if tok.creator_recent_launch:
+        creator += CREATOR_SERIAL
+    reasons = {
+        "not_copycat": 0 if tok.copycat else NOT_COPYCAT,
+        "creator_record": creator,
+        "early_buyers": _linear(tok.early_buyer_share, EARLY_FULL, EARLY_ZERO, EARLY_POINTS),
+        "climb": _linear(tok.trades_per_progress_pct, CLIMB_FULL, CLIMB_ZERO, CLIMB_POINTS),
+        "dev_share": _linear(tok.dev_share, DEV_FULL, DEV_ZERO, DEV_POINTS),
+        "insider_share": _linear(tok.insider_share, INSIDER_FULL, INSIDER_ZERO, INSIDER_POINTS),
+        "holders_differ": HOLDERS_DIFFER / 2
+        if result.get("offline")
+        else (0 if balances_alike(result["balances"]) else HOLDERS_DIFFER),
+        "no_bundle_candle": 0 if tok.bundle_candle else NO_BUNDLE_CANDLE,
+        "pro_traders": PRO_POINTS * min(tok.pro_traders / PRO_FULL, 1.0),
+        "x_link": X_POINTS.get(result.get("x_kind"), 0),
+        "red_flags": -RED_FLAG_PENALTY * len(flags),
+    }
+    narrative = result.get("narrative")
+    shadow = {
+        "narrative_score": narrative.get("score") if narrative else None,
+        "narrative_theme": narrative.get("theme") if narrative else None,
+        "narrative_red_flags": list(narrative.get("red_flags", ())) if narrative else [],
+    }
+    reasons = {k: round(v, 2) for k, v in reasons.items()}
+    score = round(min(max(sum(reasons.values()), 0), 100))
+    tier, drop = SKIP, None
+    for minimum, name, tier_drop in TIERS:
+        if score >= minimum:
+            tier, drop = name, tier_drop
+            break
+    return Conviction(score, tier, drop, reasons, tuple(sorted(flags)), shadow)
+
+
+def narrative_gate(conv: Conviction, result: dict) -> Conviction:
+    """The conviction with its tier capped by the LLM narrative score (NARRATIVE_CAPS).
+
+    The score stays as it is; only the tier and its entry drop change. Until the verdict
+    arrives the token waits (tier WAITING, no entry).
+    """
+    if not result.get("narrative_done"):
+        return replace(conv, tier=WAITING, drop=None, narrative_cap=WAITING)
+    narrative = result.get("narrative")
+    score = narrative.get("score") if narrative else None
+    cap = NARRATIVE_CAPS.get(score, SKIP) if score is not None else NOT_JUDGED_CAP
+    if conv.tier == SKIP or _RANK[cap] >= _RANK[conv.tier]:
+        return replace(conv, narrative_cap=cap)
+    return replace(conv, tier=cap, drop=_DROPS.get(cap), narrative_cap=cap)
+
+
+# Random control: the same gates as conviction, then a fixed coin flip per mint instead of
+# the score, entering on the "good" tier's dip. If conviction's picks don't beat these,
+# the score has no skill. The flip hashes the mint, so replays pick the same tokens.
+CONTROL_DROP = 0.25
+RANDOM, LABEL = "random", "label"
+
+
+def coin_flip(mint: str) -> bool:
+    return hashlib.sha256(mint.encode()).digest()[0] % 2 == 0
+
+
+def control_pick(conv: Conviction, mint: str) -> Conviction:
+    if coin_flip(mint):
+        return replace(conv, tier=RANDOM, drop=CONTROL_DROP)
+    return replace(conv, tier=SKIP, drop=None)
+
+
+def label_entry(conv: Conviction) -> Conviction:
+    """Labels: enter every eligible token at once, whatever its score, so each one gets a
+    measured outcome next to its features (the learned scorer's training data)."""
+    return replace(conv, tier=LABEL, drop=0.0)
+
+
+# Elite (owner, 14 Oct 2026: "hone in on the best ones"): one strict rule instead of a
+# score. On-chain, the stage-one filters that cut the loss most in the 24 Sep-8 Oct
+# backtest (reports/2026-10-11-m3-labels.md), the live top-5 checks, and no serial
+# launcher. With `thesis`, also a legit thesis: an X community, a narrative the judge
+# rates 4-5 and no red flags (it then waits for the verdict). Enters at once.
+ELITE = "elite"
+ELITE_MAX_DEV, ELITE_MAX_INSIDERS = 0.05, 0.20
+ELITE_MAX_HOLDER, ELITE_MAX_EARLY_BUYERS = 0.04, 0.15
+ELITE_MIN_NARRATIVE = 4
+
+
+def elite_misses(tok: TokenState, result: dict, thesis: bool) -> list[str]:
+    """The elite rule's failed parts (empty = passes); "waiting" while the narrative
+    verdict a thesis rule needs has not arrived."""
+    out = []
+    if tok.copycat:
+        out.append("copycat")
+    if tok.bundle_candle:
+        out.append("bundle_candle")
+    if tok.dev_share > ELITE_MAX_DEV:
+        out.append("dev_share")
+    if tok.insider_share > ELITE_MAX_INSIDERS:
+        out.append("insider_share")
+    if tok.largest_holder()[1] > ELITE_MAX_HOLDER:
+        out.append("largest_holder")
+    if tok.early_buyer_share > ELITE_MAX_EARLY_BUYERS:
+        out.append("early_buyers")
+    if tok.creator_recent_launch:
+        out.append("serial_launcher")
+    if result.get("offline"):
+        out.append("no_live_lookup")  # elite needs the top-5 checks
+    elif balances_alike(result["balances"]):
+        out.append("top5_balances_alike")
+    if thesis:
+        if result.get("x_kind") != "community":
+            out.append("x_not_community")
+        if not result.get("narrative_done"):
+            out.append("waiting")
+        else:
+            narrative = result.get("narrative") or {}
+            if (narrative.get("score") or 0) < ELITE_MIN_NARRATIVE:
+                out.append("narrative_below_4")
+            if narrative.get("red_flags"):
+                out.append("narrative_red_flags")
+    return out
+
+
+def elite_gate(conv: Conviction, tok: TokenState, result: dict, thesis: bool) -> Conviction:
+    misses = elite_misses(tok, result, thesis)
+    if not misses:
+        return replace(conv, tier=ELITE, drop=0.0)
+    tier = WAITING if misses == ["waiting"] else SKIP
+    return replace(conv, tier=tier, drop=None, misses=tuple(misses))

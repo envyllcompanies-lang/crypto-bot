@@ -1,0 +1,15 @@
+[Unit]
+Description=crypto-bot: pull new commits from GitHub, test, restart if they pass
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@DIR@
+ExecStart=/bin/bash @DIR@/deploy/update.sh
+# A hung fetch or test run must not block every later update check.
+TimeoutStartSec=20min
+Nice=10
+MemoryMax=450M
+MemorySwapMax=0

@@ -1,0 +1,270 @@
+# Run the paper trader 24/7, free
+
+The paper trader runs on Google Cloud's free-tier **e2-micro** server in us-east1 (South Carolina). The free tier covers one e2-micro per month, permanently, in us-east1, us-central1 or us-west1. A 1-minute live test used about 2.4% of one CPU core and 69 MB of memory, well inside the e2-micro. It is paper trading only: no wallet, no keys, no money.
+
+## 1. Create a Google Cloud account
+
+1. Go to https://console.cloud.google.com/ and sign in with a Google account. Accept the free trial; Google asks for a card to check your identity.
+2. **Set a $1 budget alert** at https://console.cloud.google.com/billing/budgets, so Google emails you if anything ever starts costing money.
+
+## 2. Create the server
+
+Go to https://console.cloud.google.com/compute/instances. Click "Enable" if asked, then **Create instance**, and set:
+
+- **Name:** `crypto-bot`.
+- **Region:** `us-east1` (South Carolina), zone `us-east1-b`.
+- **Machine type:** E2 → `e2-micro`.
+- **Boot disk:** Change → **Ubuntu 24.04 LTS** (x86/64), disk type **Standard persistent disk**, size **30 GB**. The default "Balanced" disk is not free.
+- **Firewall:** leave both boxes unticked; nothing needs to reach the server.
+
+Click **Create**.
+
+## 3. Open a terminal on the server
+
+In the instance list, click **SSH** next to `crypto-bot`. A terminal opens in your browser; no key files are needed.
+
+## Or: Oracle Cloud Always Free (preferred if you have an account)
+
+Oracle's Always Free tier is permanent; only its $300 trial credit ends after 30 days. Its Ampere machine has dedicated CPU and runs in Ashburn, Virginia, close to Solana's infrastructure.
+
+1. Check that the region shown at the top right of https://cloud.oracle.com is **US East (Ashburn)**. That's your home region, and Always Free machines run only there.
+2. Go to Menu → Compute → Instances → **Create instance** and set:
+   - **Image:** Canonical Ubuntu 24.04.
+   - **Shape:** Ampere `VM.Standard.A1.Flex`, 1 OCPU, 6 GB. It must show **"Always Free-eligible"**.
+   - **SSH keys:** "Generate a key pair for me" → **Save private key**.
+3. Click **Create**. If it says "Out of capacity", retry later or pick another availability domain. Copy the **Public IP address**.
+4. From your Mac's Terminal, run `chmod 600` on the key file, then:
+   `ssh -i ~/Downloads/YOUR-KEY.key ubuntu@PUBLIC_IP`
+5. Continue with step 4 below.
+
+## 4. Install and start (on the server)
+
+```bash
+sudo apt-get update -qq && sudo apt-get install -y -qq git curl ca-certificates && git clone -b claude/focused-pasteur-1utc3l https://github.com/envyllcompanies-lang/crypto-bot.git ~/crypto-bot && bash ~/crypto-bot/deploy/setup.sh
+```
+
+This installs uv, Python 3.12 and the pinned packages, then runs the tests. It also starts:
+
+- the paper trader, as a service that restarts after a crash or a reboot;
+- the social collector (`crypto-bot-social`) and the X reader (`crypto-bot-x`, idle until you log in to X);
+- an update check every 15 minutes: new commits on GitHub are pulled and tested; if the tests pass, only the services whose code changed restart (a docs-only commit restarts nothing), and if a restarted service doesn't stay up, the update is rolled back and not tried again;
+- an hourly snapshot of the run;
+- a daily job at 00:10 UTC that rebuilds the tracked-wallet list from the last day of recordings (`data/reports/<date>-tracked.md`; set `CRYPTOBOT_TRACKED_DAYS` in `.env` for more days) and the creator records from the last 14 days (`data/reports/<date>-creators.md`; `CRYPTOBOT_CREATOR_DAYS`), builds the labelled-outcomes table (`data/reports/<date>-labels.md`), writes `data/reports/<date>-paper.md` and deletes raw events older than 14 days. It is capped at 450 MB of memory (no swap) so it can't starve the trader; if a build hits the cap, it is stopped and the previous file stays in use.
+
+## Everyday commands (on the server)
+
+| What | Command |
+|---|---|
+| Is it running? | `systemctl status crypto-bot` |
+| Live log | `journalctl -u crypto-bot -f` |
+| Report so far | `cd ~/crypto-bot && ~/.local/bin/uv run python -m cryptobot.m6_report` |
+| Update now (it also updates itself every 15 minutes) | `bash ~/crypto-bot/deploy/update.sh` |
+| Update log | `journalctl -u crypto-bot-update` |
+| Stop / start (a stopped service stays stopped through updates) | `sudo systemctl stop crypto-bot` / `sudo systemctl start crypto-bot` |
+| Backtest the downloaded history (background, capped at 450 MB) | `bash ~/crypto-bot/deploy/backtest.sh` |
+| Follow the backtest | `journalctl -u crypto-bot-backtest -f` |
+| Backtest report | `cd ~/crypto-bot && .venv/bin/python -m cryptobot.m6_report data/backtest/<folder>` |
+
+
+Social signals (`crypto-bot-social.service`, free public APIs, logged but not traded on):
+
+```
+sudo systemctl status crypto-bot-social --no-pager
+cd ~/crypto-bot && .venv/bin/python -m cryptobot.social report
+```
+
+## Optional: reports pushed to GitHub
+
+To read the reports on GitHub (on the `paper-results` branch) instead of logging in. Once
+set up, the server pushes:
+
+- `latest/` every hour at :25 UTC: `paper.md` (the paper report so far), `labels.md` (the
+  thesis and filter breakdown) and `status.md` (is the trader running, code version, disk,
+  memory, restarts). Claude can read these too: ask it to "check the paper trader".
+- `reports/` every night: the dated paper, labels, tracked-wallet and creator reports.
+
+Only these report files are pushed: never `.env`, keys or raw data. The repo is public, so
+anyone can read them; they hold no secrets.
+
+Setup:
+
+1. On the server, run:
+
+   ```bash
+   ssh-keygen -t ed25519 -N "" -f ~/.ssh/crypto_bot_deploy -C crypto-bot-server && printf 'Host github.com\n  IdentityFile ~/.ssh/crypto_bot_deploy\n  IdentitiesOnly yes\n  StrictHostKeyChecking accept-new\n' >> ~/.ssh/config && cat ~/.ssh/crypto_bot_deploy.pub
+   ```
+
+2. Copy the line it prints. It's a public key, so it's safe to share.
+3. Add it at https://github.com/envyllcompanies-lang/crypto-bot/settings/keys → **Add deploy key**, and tick **Allow write access**.
+4. Back on the server:
+
+   ```bash
+   git -C ~/crypto-bot remote set-url origin git@github.com:envyllcompanies-lang/crypto-bot.git && echo CRYPTOBOT_PUSH_REPORTS=1 >> ~/crypto-bot/.env
+   ```
+
+## Optional: Reddit, YouTube, Farcaster, Telegram and X for the social collector
+
+Each is off until you add keys to `.env` on the server (`nano ~/crypto-bot/.env`), then
+run `sudo systemctl restart crypto-bot-social`. Never paste keys into chat. Reading X
+through your own account needs no key, only a one-time login (below).
+
+**Reddit (free, non-commercial).** Without keys the bot already reads Reddit's public RSS
+feeds; app keys give it the official API with higher limits.
+
+1. Signed in to Reddit, open https://www.reddit.com/prefs/apps and choose "create another
+   app...".
+2. Pick **script**, give it a name, and put `http://localhost` as the redirect URI.
+3. Add three lines to `.env`. The client id is the short string under the app name, and
+   the secret is labelled "secret":
+
+   ```
+   REDDIT_CLIENT_ID=...
+   REDDIT_CLIENT_SECRET=...
+   REDDIT_USERNAME=your_reddit_name
+   ```
+
+It only reads: new posts in memecoin subreddits, and r/popular's hottest titles.
+
+**YouTube (free).**
+
+1. In the Google Cloud console (the same account as the server), open "APIs & Services".
+2. Enable "YouTube Data API v3".
+3. Create an API key, and restrict it to that API.
+4. Add it to `.env`:
+
+   ```
+   YOUTUBE_API_KEY=...
+   ```
+
+It reads the 50 most popular US videos every 30 minutes. It also searches up to 60 watched
+coins a day, which stays inside the free 10,000 units a day.
+
+**Farcaster (free).** Sign up at https://neynar.com (free plan), copy the API key and add
+it to `.env`:
+
+```
+NEYNAR_API_KEY=...
+```
+
+**Telegram call channels without an account (free, no risk to an account).** The bot
+reads Telegram's public preview pages (t.me/s/name). To have it count coin mentions in
+public call channels, list them in `.env`:
+
+```
+TELEGRAM_WEB_CHANNELS=channelname1,channelname2
+```
+
+Each watched coin's own Telegram (members, posts in the last hour) is read automatically
+from its metadata link; nothing to set.
+
+**Telegram through your own account (optional; read the risk first).**
+
+Telegram allows this API, but accounts logged in through third-party apps can be flagged
+or banned. Its terms added a data-scraping clause in Feb 2026. Use an account you can
+afford to lose, list only public channels you would follow anyway, and the bot never
+posts.
+
+1. Get an `api_id` and `api_hash` at https://my.telegram.org under "API development
+   tools".
+2. Add to `.env`:
+
+   ```
+   TELEGRAM_API_ID=...
+   TELEGRAM_API_HASH=...
+   TELEGRAM_CHANNELS=channelname1,channelname2
+   ```
+
+3. Log in once on the server. It asks for your phone number and the code Telegram sends:
+
+   ```
+   .venv/bin/python -m cryptobot.telegram_feed login
+   ```
+
+   This creates `data/derived/telegram.session`, which is a login: never share it. It is
+   git-ignored.
+
+Mastodon and GDELT (world news coverage of each watched coin's name) need no keys and
+are always on.
+
+**X through your own account (free; read the risk first).**
+
+The bot reads X as your account would in a browser: searches for each watched coin's
+contract address and $TICKER, and the coin's own X community, post or profile. It only
+reads, slowly (one request every 20 seconds, at most 300 a day). Reading X this way
+breaks X's terms, and X can lock or suspend the account, so use a spare account, not
+your main one. If X stops the account, the bot stops reading and logs why.
+
+1. In a browser, sign in to the X account you want the bot to use.
+2. Open x.com, press F12, go to **Application** (Chrome) or **Storage** (Firefox) >
+   **Cookies** > `https://x.com`, and find two values: `auth_token` and `ct0`. They work
+   like a password: don't paste them into chat or anywhere else.
+3. On the server, run the login and type them in when asked (the input is hidden):
+
+   ```
+   cd ~/crypto-bot && .venv/bin/python -m cryptobot.xscrape login
+   ```
+
+   It checks them with one request and prints the account's follower count. The session
+   is saved in `data/derived/x_accounts.db` (git-ignored, readable only by you).
+4. Don't click "Log out" on X in that browser, or the saved session stops working. Close
+   the tab instead.
+
+The X service starts reading within 10 minutes. To check on it:
+
+```
+cd ~/crypto-bot && .venv/bin/python -m cryptobot.xscrape status   # account, requests today, state
+sudo journalctl -u crypto-bot-x -n 20 --no-pager
+systemctl show -p MemoryPeak crypto-bot-x                    # should stay well under 160M
+```
+
+`status` says "probably logged out" when X keeps refusing the session (log in again),
+and "searches failing" when X answers searches with errors or block pages, which can
+happen from a cloud server; it then pauses for 30 minutes at a time and records nothing,
+so a block never shows up as "no posts".
+
+If X logs the account out, run the login again with fresh cookies. To stop reading X
+entirely: `.venv/bin/python -m cryptobot.xscrape logout`. Optional limits in `.env`:
+`X_SCRAPE_PER_DAY=300` and `X_SCRAPE_GAP_S=20`.
+
+**X (paid, official API).**
+
+X has no free API tier for new developers. As of Oct 2026, guides put it at about
+$0.005 per counts request (X's own pricing page wasn't readable from here). The bot
+makes one request per watched coin, a few hundred a day at most. The budget cap below is
+a hard stop.
+
+1. Create a project and app at https://developer.x.com and buy credits there.
+2. Copy the app's **Bearer Token**.
+3. Add to `.env`:
+
+   ```
+   X_BEARER_TOKEN=...
+   X_MONTHLY_BUDGET_USD=10
+   X_COST_PER_REQUEST_USD=0.005
+   ```
+
+Set `X_COST_PER_REQUEST_USD` to the price X shows you. The bot stops for the month when
+requests x price would pass the budget. It keeps its count in
+`data/derived/x_budget.json`; check X's billing page too.
+
+Check what's on:
+
+```
+sudo journalctl -u crypto-bot-social -n 20 --no-pager    # "social sources with keys: ..."
+```
+
+## Things to know
+
+- **Cost check:** the free tier covers the machine, a 30 GB standard disk and 1 GB a month of outbound traffic. The trader mostly downloads, and incoming traffic is free. Google's pricing for the server's public IPv4 address has changed over time, so look at the billing page after a day; the budget alert will also email you.
+- **Disk:** raw events take roughly 0.8 GB a day, and 14 days are kept. Change that with `CRYPTOBOT_KEEP_DAYS=N` in `~/crypto-bot/.env`. Trades, decisions and reports are kept.
+- **Restarts:** each restart of the paper trader starts a new run, and Final Stretch waits 40 minutes again. Updates restart it only when its own code changed.
+- **Narrative judge (optional, free):** the trader can ask a free LLM tier to rate each candidate token's narrative. Get a free key at https://console.groq.com/keys (Groq, used first) and/or https://aistudio.google.com/apikey (Gemini, the fallback), then type it in yourself on the server, replacing `...` with the key:
+
+  ```bash
+  nano ~/crypto-bot/.env       # add a line GROQ_API_KEY=... , save with Ctrl+O, exit with Ctrl+X
+  sudo systemctl restart crypto-bot
+  ```
+
+  (Use the editor, not `echo ... >> .env`: an `echo` with the key would be saved in your
+  shell history.) For Gemini, add `GEMINI_API_KEY=...` the same way. The log line `narrative judge: groq` confirms it (`journalctl -u crypto-bot | grep narrative`); the key itself is never printed. Without a key the narrative is "not evaluated". Free tiers have daily limits; once one runs out, narratives are "not evaluated" until it resets.
+- **Faster feed:** to use a faster data feed later, put `CRYPTOBOT_WS_URL=...` in `~/crypto-bot/.env` yourself and run `sudo systemctl restart crypto-bot`. The URL is never printed.

@@ -1,0 +1,21 @@
+[Unit]
+Description=crypto-bot social collector (free public APIs: DexScreener, GeckoTerminal, Google Trends RSS, Wikipedia)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=@USER@
+WorkingDirectory=@DIR@
+# Optional keys (Reddit app, X bearer token and budget) come from the owner's .env.
+EnvironmentFile=-@DIR@/.env
+ExecStart=@DIR@/.venv/bin/python -m cryptobot.social run
+Restart=always
+RestartSec=30
+# Small: a few HTTP polls a minute and a JSON state file. Capped so it can never crowd
+# out the paper trader on the 1 GB machine.
+MemoryHigh=120M
+MemoryMax=160M
+MemorySwapMax=0
+
+[Install]
+WantedBy=multi-user.target

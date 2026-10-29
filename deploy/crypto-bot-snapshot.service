@@ -1,0 +1,13 @@
+[Unit]
+Description=crypto-bot hourly snapshot (report, labels, status) pushed to GitHub
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@DIR@
+EnvironmentFile=-@DIR@/.env
+ExecStart=/bin/bash @DIR@/deploy/snapshot.sh
+# Shares the 1 GB machine with the paper trader: capped and low priority.
+MemoryMax=350M
+MemorySwapMax=0
+Nice=15
